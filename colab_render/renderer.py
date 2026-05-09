@@ -6,17 +6,68 @@ Frames are read back as RGB uint8 and written to ffmpeg's stdin so we never
 touch the disk for intermediate PNGs.
 """
 from __future__ import annotations
-import os, sys, time, subprocess
+import os, sys, time, subprocess, glob
 import numpy as np
+
+# Force libEGL to load only the NVIDIA ICD on Colab GPU runtimes. apt's libegl1
+# installs Mesa's ICD too, and the default device-selection often picks
+# llvmpipe (software), pinning the renderer to ~1 fps. We must set this before
+# moderngl/libEGL is loaded, so it lives at module top.
+_NV_ICDS = [p for p in glob.glob("/usr/share/glvnd/egl_vendor.d/*nvidia*.json")]
+if _NV_ICDS and "__EGL_VENDOR_LIBRARY_FILENAMES" not in os.environ:
+    os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = ":".join(_NV_ICDS)
+os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 
 import moderngl
 from . import shaders
 from .features import FrameData
 
 
-def _make_ctx():
-    """Create a standalone EGL OpenGL 3.3 context. Works on Colab GPU runtimes."""
-    return moderngl.create_context(standalone=True, backend="egl", require=330)
+def _is_software(renderer_str: str) -> bool:
+    s = renderer_str.lower()
+    return any(k in s for k in ("llvmpipe", "softpipe", "swrast", "software"))
+
+
+def _make_ctx(verbose: bool = True):
+    """Create a standalone EGL OpenGL 3.3 context bound to the NVIDIA GPU.
+
+    Iterates EGL devices and picks the first one whose GL_RENDERER doesn't
+    look like a software rasterizer. Raises with a clear message if none
+    found, since otherwise rendering would silently fall back to ~1 fps.
+    """
+    last_err = None
+    for idx in range(8):
+        try:
+            ctx = moderngl.create_context(
+                standalone=True, backend="egl", require=330, device_index=idx,
+            )
+        except Exception as e:
+            last_err = e
+            continue
+        renderer = ctx.info.get("GL_RENDERER", "?")
+        vendor = ctx.info.get("GL_VENDOR", "?")
+        if verbose:
+            print(f"[colab_render] EGL device {idx}: {vendor} | {renderer}")
+        if not _is_software(renderer):
+            return ctx
+        ctx.release()
+
+    # Last-resort fallback (default device). Warn loudly.
+    try:
+        ctx = moderngl.create_context(standalone=True, backend="egl", require=330)
+        renderer = ctx.info.get("GL_RENDERER", "?")
+        if _is_software(renderer):
+            raise RuntimeError(
+                f"Only software EGL device available (GL_RENDERER={renderer!r}). "
+                "On Colab: confirm Runtime → GPU is selected, then re-run the setup cell. "
+                "If this persists, check that /usr/share/glvnd/egl_vendor.d/ contains "
+                "an *nvidia*.json ICD."
+            )
+        return ctx
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to create a hardware EGL context. Last error: {last_err or e}"
+        )
 
 
 class Renderer:
