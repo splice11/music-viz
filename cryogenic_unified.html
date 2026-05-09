@@ -1,0 +1,904 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Cryogenic — Unified Visualizer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: ui-monospace, Menlo, monospace; color: #ccc; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+
+  /* ─── Upload Overlay ─── */
+  #upload-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,0.92);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    transition: opacity 0.6s ease, visibility 0.6s;
+  }
+  #upload-overlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+  #upload-overlay h1 { font-size: 28px; letter-spacing: 0.15em; text-transform: uppercase; margin: 0 0 8px; color: #fff; }
+  #upload-overlay p { font-size: 13px; opacity: 0.5; margin: 0 0 32px; }
+  .drop-zone {
+    width: 420px; max-width: 90vw;
+    border: 2px dashed #444; border-radius: 8px;
+    padding: 48px 24px; text-align: center;
+    transition: border-color 0.3s, background 0.3s;
+    cursor: pointer;
+  }
+  .drop-zone:hover, .drop-zone.dragover { border-color: #888; background: rgba(255,255,255,0.03); }
+  .drop-zone .label { font-size: 14px; color: #888; margin-bottom: 16px; }
+  .file-input { display: none; }
+  .btn {
+    background: transparent; border: 1px solid #555; color: #aaa;
+    padding: 8px 20px; font: inherit; cursor: pointer; font-size: 12px;
+    letter-spacing: 0.1em; text-transform: uppercase; transition: all 0.2s;
+  }
+  .btn:hover { background: rgba(255,255,255,0.08); border-color: #888; color: #fff; }
+  .btn.primary { border-color: #fff; color: #fff; }
+  .btn.primary:hover { background: rgba(255,255,255,0.15); }
+  .status-msg { margin-top: 16px; font-size: 12px; color: #666; min-height: 18px; }
+  .status-msg.ready { color: #7a7; }
+  .status-msg.error { color: #a55; }
+
+  /* ─── Player UI ─── */
+  #player-ui {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
+    background: linear-gradient(to top, rgba(0,0,0,0.85), transparent);
+    padding: 20px 24px 24px;
+    display: flex; align-items: center; gap: 16px;
+    opacity: 0; transition: opacity 0.4s; pointer-events: none;
+  }
+  #player-ui.active { opacity: 1; pointer-events: auto; }
+  #player-ui .section-name {
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: #888; min-width: 80px;
+  }
+  #player-ui .section-name .current { color: #fff; }
+  #progress-wrap {
+    flex: 1; height: 3px; background: rgba(255,255,255,0.1); border-radius: 2px;
+    position: relative; cursor: pointer;
+  }
+  #progress-bar {
+    height: 100%; width: 0%; background: #fff; border-radius: 2px;
+    transition: width 0.1s linear;
+  }
+  #time-display { font-size: 11px; color: #888; min-width: 70px; text-align: right; }
+  #mode-badge {
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: #666; border: 1px solid #333; padding: 2px 8px; border-radius: 3px;
+  }
+
+  /* ─── Top-right controls ─── */
+  #top-controls {
+    position: fixed; top: 16px; right: 16px; z-index: 50;
+    display: flex; gap: 8px; opacity: 0; transition: opacity 0.4s;
+  }
+  #top-controls.active { opacity: 1; }
+
+  /* ─── Rec indicator ─── */
+  #rec-dot {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    width: 8px; height: 8px; border-radius: 50%; background: #f44;
+    opacity: 0; transition: opacity 0.3s; z-index: 50;
+  }
+  #rec-dot.on { opacity: 1; animation: pulse 1s ease infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+</style>
+</head>
+<body>
+
+<!-- Upload Overlay -->
+<div id="upload-overlay">
+  <h1>Cryogenic Visualizer</h1>
+  <p>Drop your song and analysis data to begin</p>
+  <div class="drop-zone" id="drop-zone">
+    <div class="label">Drag &amp; drop files here<br><span style="opacity:0.5;font-size:12px">or click to browse</span></div>
+    <input type="file" class="file-input" id="file-mp3" accept="audio/*">
+    <input type="file" class="file-input" id="file-json" accept=".json">
+    <div style="display:flex; gap:8px; justify-content:center; margin-top:8px;">
+      <button class="btn" id="btn-mp3">Choose MP3</button>
+      <button class="btn" id="btn-json">Choose JSON</button>
+    </div>
+    <div class="status-msg" id="upload-status"></div>
+    <button class="btn primary" id="btn-start" style="margin-top:16px;display:none;">▶ Start Visualization</button>
+  </div>
+</div>
+
+<!-- Canvas -->
+<canvas id="c"></canvas>
+
+<!-- Player UI -->
+<div id="player-ui">
+  <button class="btn" id="play-btn">▶</button>
+  <div class="section-name"><span class="current" id="section-name">—</span></div>
+  <div id="progress-wrap"><div id="progress-bar"></div></div>
+  <div id="time-display">0:00 / 0:00</div>
+  <div id="mode-badge" title="Current visual mode">—</div>
+</div>
+
+<!-- Top Controls -->
+<div id="top-controls">
+  <button class="btn" id="rec-btn" title="Toggle recording mode (hides UI)">● rec</button>
+  <button class="btn" id="reset-btn" title="Back to upload">↺ reset</button>
+</div>
+
+<!-- Rec Indicator -->
+<div id="rec-dot"></div>
+
+<audio id="audio" preload="auto"></audio>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// CRYOGENIC — Unified Multi-Shader Visualizer
+// 4 visual modes crossfaded across song sections:
+//   0 Cryo Crystal   (intro, breakdown)  — cold, fractured, raymarched ice
+//   1 Plasma Tunnel  (verse, outro)      — warm, hypnotic, noise tunnel
+//   2 Liquid Metal   (drop_1)            — industrial, reflective metaballs
+//   3 Spectrum Lattice (main)            — clinical, chromatic data-grid
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MODES = [
+  { name: "Cryo Crystal",   shader: 0, desc: "cold fractured ice" },
+  { name: "Plasma Tunnel",  shader: 1, desc: "warm hypnotic tunnel" },
+  { name: "Liquid Metal",   shader: 2, desc: "industrial chrome" },
+  { name: "Spectrum Lattice", shader: 3, desc: "clinical data-grid" }
+];
+
+const SECTION_MAP = [0, 1, 2, 3, 0, 1]; // intro,verse,drop,main,breakdown,outro
+
+// ─── Vertex Shader (shared) ────────────────────────────────────────────────
+const VS = `version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
+
+// ─── Fragment Shader 0: Cryo Crystal ─────────────────────────────────────
+const FS0 = `version 300 es
+precision highp float;
+out vec4 outColor;
+uniform vec2  uRes;
+uniform float uTime;
+uniform float uBass;
+uniform float uDrum;
+uniform float uLeadHi;
+uniform float uBeat;
+uniform vec3  uTint;
+uniform float uSection;
+uniform float uCamDist;
+uniform float uFade;      // crossfade alpha
+
+#define PI 3.14159265
+
+mat2 rot(float a){ float s=sin(a),c=cos(a); return mat2(c,-s,s,c); }
+
+float de(vec3 p){
+  p += sin(p.yzx*1.7 + uTime*.4) * (0.05 + 0.35*uBass);
+  vec3 z = p;
+  float dr = 1.0;
+  float r = 0.0;
+  float power = 6.0 + 2.0*uLeadHi;
+  for(int i=0;i<7;i++){
+    r = length(z);
+    if(r>2.0) break;
+    float theta = acos(z.z/r);
+    float phi   = atan(z.y, z.x);
+    dr = pow(r, power-1.0)*power*dr + 1.0;
+    float zr = pow(r, power);
+    theta *= power; phi *= power;
+    z = zr*vec3(sin(theta)*cos(phi), sin(phi)*sin(theta), cos(theta));
+    z += p;
+    z += uDrum * 0.15 * sin(z.zxy*4.0 + uTime*2.0);
+  }
+  return 0.5*log(r)*r/dr;
+}
+
+vec3 calcNorm(vec3 p){
+  vec2 e = vec2(0.001,0.0);
+  return normalize(vec3(
+    de(p+e.xyy)-de(p-e.xyy),
+    de(p+e.yxy)-de(p-e.yxy),
+    de(p+e.yyx)-de(p-e.yyx)));
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;
+  uv += uDrum*0.012*vec2(sin(uTime*53.0), cos(uTime*47.0));
+  float dist = uCamDist;
+  vec3 ro = vec3(0.0, 0.0, -dist);
+  vec3 rd = normalize(vec3(uv, 1.4));
+  float a = uTime*0.07;
+  ro.xz *= rot(a);  rd.xz *= rot(a);
+  ro.yz *= rot(a*0.5); rd.yz *= rot(a*0.5);
+  float t = 0.0;
+  float minD = 1e9;
+  vec3 hitP = ro;
+  bool hit = false;
+  for(int i=0;i<96;i++){
+    vec3 p = ro + rd*t;
+    float d = de(p);
+    minD = min(minD, d);
+    if(d < 0.001){ hit = true; hitP = p; break; }
+    if(t > 12.0) break;
+    t += d*0.85;
+  }
+  vec3 col = vec3(0.02, 0.05, 0.10);
+  if(hit){
+    vec3 n = calcNorm(hitP);
+    vec3 ldir = normalize(vec3(0.4, 0.7, -0.6));
+    float diff = max(0.0, dot(n, ldir));
+    float fres = pow(1.0 - max(0.0, dot(n, -rd)), 3.0);
+    vec3 ice = mix(vec3(0.45, 0.78, 1.0), vec3(0.85, 0.9, 1.0), uLeadHi);
+    vec3 deep = vec3(0.05, 0.1, 0.25);
+    col = mix(deep, ice, diff*0.7 + fres*0.5);
+    col = mix(col, col * (vec3(1.0)+uTint*0.6), 0.35);
+    col += ice * uLeadHi * 0.4 * (1.0-fres);
+    col += vec3(0.7, 0.9, 1.2) * uBeat * fres * 1.5;
+  }
+  float glow = exp(-minD*8.0);
+  col += vec3(0.2, 0.45, 0.8) * glow * (0.4 + uBass*1.2);
+  float vg = 1.0 - 0.6*length(uv);
+  col *= vg;
+  float grain = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233)))*43758.5453);
+  col += (grain-0.5)*0.025;
+  col = col / (1.0 + col);
+  col = pow(col, vec3(1.0/2.2));
+  outColor = vec4(col, uFade);
+}`;
+
+// ─── Fragment Shader 1: Plasma Tunnel ──────────────────────────────────────
+const FS1 = `version 300 es
+precision highp float;
+out vec4 outColor;
+uniform vec2  uRes;
+uniform float uTime;
+uniform float uBass, uDrum, uLeadHi, uBeat;
+uniform vec3  uTint;
+uniform float uSection;
+uniform float uTunnelZ;
+uniform float uFade;
+
+#define PI 3.14159265
+
+float hash(vec3 p){ return fract(sin(dot(p, vec3(127.1,311.7,74.7)))*43758.5453); }
+float noise(vec3 p){
+  vec3 i = floor(p), f = fract(p);
+  f = f*f*(3.0-2.0*f);
+  float a = hash(i);
+  float b = hash(i+vec3(1,0,0));
+  float c = hash(i+vec3(0,1,0));
+  float d = hash(i+vec3(1,1,0));
+  float e = hash(i+vec3(0,0,1));
+  float g = hash(i+vec3(1,0,1));
+  float h = hash(i+vec3(0,1,1));
+  float k = hash(i+vec3(1,1,1));
+  return mix(mix(mix(a,b,f.x),mix(c,d,f.x),f.y),
+             mix(mix(e,g,f.x),mix(h,k,f.x),f.y), f.z);
+}
+float fbm(vec3 p){
+  float v=0., a=0.5;
+  for(int i=0;i<5;i++){ v += a*noise(p); p *= 2.07; a *= 0.5; }
+  return v;
+}
+
+vec3 palette(float t, vec3 tint, float section){
+  vec3 a, b, c, d;
+  if(section < 0.5){
+    a = vec3(0.1,0.15,0.3); b = vec3(0.4,0.5,0.7);
+    c = vec3(1.0,1.0,1.0); d = vec3(0.0,0.33,0.67);
+  } else if(section < 1.5){
+    a = vec3(0.4,0.2,0.1); b = vec3(0.7,0.4,0.2);
+    c = vec3(1.0,1.0,1.0); d = vec3(0.0,0.15,0.25);
+  } else if(section < 2.5){
+    a = vec3(0.5,0.1,0.3); b = vec3(0.8,0.5,0.3);
+    c = vec3(1.0,1.0,0.9); d = vec3(0.2,0.0,0.4);
+  } else if(section < 3.5){
+    a = vec3(0.5,0.3,0.4); b = vec3(0.6,0.5,0.6);
+    c = vec3(1.0,1.0,1.0); d = vec3(0.0,0.33,0.67);
+  } else if(section < 4.5){
+    a = vec3(0.2,0.25,0.3); b = vec3(0.35,0.4,0.45);
+    c = vec3(0.8,0.8,0.9); d = vec3(0.0,0.15,0.30);
+  } else {
+    a = vec3(0.35,0.2,0.45); b = vec3(0.7,0.5,0.8);
+    c = vec3(1.0,1.0,1.0); d = vec3(0.1,0.2,0.5);
+  }
+  vec3 col = a + b * cos(6.2831 * (c*t + d));
+  return mix(col, col*tint*1.2, 0.3);
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;
+  float sec = floor(uSection + 0.5);
+  float ca = uDrum * 0.004;
+  vec2 dir = normalize(uv + 0.0001);
+  vec3 col;
+  for(int ch=0; ch<3; ch++){
+    vec2 p = uv + dir * ca * (float(ch)-1.0);
+    float r = length(p) + 0.001;
+    float a = atan(p.y, p.x);
+    float z = 1.0/r + uTunnelZ;
+    float u = a/PI;
+    float warp = 0.6 + 1.2*uLeadHi;
+    vec3 q = vec3(u*3.0, z*0.4, uTime*0.15);
+    q.xy += 0.8*vec2(fbm(q*warp), fbm(q*warp + 5.2));
+    float n = fbm(q*warp);
+    float pa = n + 0.15*z;
+    vec3 c = palette(pa, uTint, sec);
+    float fade = smoothstep(0.0, 0.6, r) * smoothstep(2.0, 0.4, r);
+    c *= fade;
+    c += vec3(1.0,0.95,0.8) * smoothstep(0.7, 0.95, n) * (0.4 + uLeadHi);
+    c *= (1.0 + uBeat*0.7);
+    c *= (1.0 + uBass*0.6) * (0.7 + 0.3*r);
+    col[ch] = c[ch];
+  }
+  float vg = 1.0 - 0.5*length(uv);
+  col *= vg;
+  float grain = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233)))*43758.5453);
+  col += (grain-0.5)*0.04;
+  col = col / (1.0 + col);
+  col = pow(col, vec3(1.0/2.2));
+  outColor = vec4(col, uFade);
+}`;
+
+// ─── Fragment Shader 2: Liquid Metal ─────────────────────────────────────
+const FS2 = `version 300 es
+precision highp float;
+out vec4 outColor;
+uniform vec2 uRes;
+uniform float uTime;
+uniform float uBass, uDrum, uLeadHi, uPulse;
+uniform vec3  uTint;
+uniform float uBallCount;
+uniform float uFade;
+
+#define PI 3.14159265
+
+mat2 rot(float a){ float s=sin(a),c=cos(a); return mat2(c,-s,s,c); }
+
+float smin(float a, float b, float k){
+  float h = clamp(0.5+0.5*(b-a)/k, 0.0, 1.0);
+  return mix(b,a,h) - k*h*(1.0-h);
+}
+
+float scene(vec3 p){
+  p.xz *= rot(uTime*0.1);
+  float field = 100.0;
+  int n = int(uBallCount);
+  for(int i=0;i<8;i++){
+    if(i>=n) break;
+    float fi = float(i);
+    float t = uTime*0.6 + fi*1.234;
+    vec3 c = vec3(
+      sin(t*0.7 + fi)*1.2,
+      cos(t*0.5 + fi*1.7)*1.0,
+      sin(t*0.9 + fi*0.7)*1.2
+    );
+    c += uBass*0.4*vec3(sin(t*3.0), cos(t*2.0), sin(t*4.0));
+    float r = 0.55 + 0.25*sin(t + fi) + uPulse*0.15;
+    float d = length(p-c) - r;
+    field = smin(field, d, 0.6);
+  }
+  field += uDrum*0.05*sin(p.x*8.0 + uTime*5.0)*sin(p.y*8.0)*sin(p.z*8.0);
+  return field;
+}
+
+vec3 norm(vec3 p){
+  vec2 e=vec2(0.001,0);
+  return normalize(vec3(
+    scene(p+e.xyy)-scene(p-e.xyy),
+    scene(p+e.yxy)-scene(p-e.yxy),
+    scene(p+e.yyx)-scene(p-e.yyx)));
+}
+
+vec3 env(vec3 dir, float hi){
+  float up = clamp(dir.y*0.5+0.5, 0.0, 1.0);
+  vec3 sky = mix(vec3(0.04,0.05,0.08), vec3(0.85,0.9,1.0), pow(up, 1.5));
+  vec3 warm = mix(vec3(0.1,0.05,0.03), vec3(1.0,0.7,0.4), pow(up, 1.5));
+  vec3 base = mix(sky, warm, hi);
+  vec3 sun = normalize(vec3(0.4, 0.6, -0.5));
+  float s = pow(max(0.0, dot(dir, sun)), 60.0);
+  base += vec3(1.0,0.95,0.85) * s * 1.5;
+  float band = smoothstep(0.45, 0.5, abs(dir.y));
+  base += vec3(0.05,0.05,0.07)*band;
+  return base;
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;
+  uv *= 1.0 + 0.05*length(uv)*length(uv);
+  vec3 ro = vec3(0.0, 0.2, -3.5);
+  vec3 rd = normalize(vec3(uv, 1.6));
+  float t = 0.0;
+  bool hit = false;
+  vec3 hp = ro;
+  for(int i=0;i<80;i++){
+    vec3 p = ro + rd*t;
+    float d = scene(p);
+    if(d < 0.001){ hit=true; hp=p; break; }
+    if(t > 8.0) break;
+    t += d*0.9;
+  }
+  vec3 col;
+  if(hit){
+    vec3 n = norm(hp);
+    vec3 view = -rd;
+    vec3 refl = reflect(rd, n);
+    float fres = pow(1.0 - max(0.0, dot(n, view)), 4.0);
+    vec3 reflCol = env(refl, uLeadHi);
+    reflCol = mix(reflCol, reflCol*(vec3(1.0)+uTint*0.7), 0.25);
+    vec3 base = vec3(0.06, 0.07, 0.09);
+    col = mix(base, reflCol, 0.85);
+    col += fres * vec3(0.4, 0.45, 0.55) * 0.5;
+    col += pow(max(0.0, dot(refl, normalize(vec3(0.4,0.6,-0.5)))), 80.0) * 1.2;
+  } else {
+    col = env(rd, uLeadHi) * 0.7;
+  }
+  col *= 1.0 - 0.4*length(uv);
+  float grain = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233)))*43758.5453);
+  col += (grain-0.5)*0.02;
+  col = col / (1.0+col);
+  col = pow(col, vec3(1.0/2.2));
+  outColor = vec4(col, uFade);
+}`;
+
+// ─── Fragment Shader 3: Spectrum Lattice ─────────────────────────────────
+const FS3 = `version 300 es
+precision highp float;
+out vec4 outColor;
+uniform vec2 uRes;
+uniform float uTime;
+uniform float uBass, uDrum, uLeadHi, uBeat;
+uniform float uChroma[12];
+uniform float uRotation;
+uniform float uRings;
+uniform float uFade;
+
+#define PI 3.14159265
+
+vec3 ramp(float t){
+  vec3 c1 = mix(vec3(0.2,0.55,0.9), vec3(0.95,0.6,0.2), uLeadHi);
+  return mix(vec3(0.05), c1, smoothstep(0.0,1.0,t));
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;
+  uv += uDrum*0.006*vec2(sin(uTime*40.0), cos(uTime*37.0));
+  float ca = cos(uRotation), sa = sin(uRotation);
+  uv = mat2(ca,-sa,sa,ca) * uv;
+  float r = length(uv);
+  float a = atan(uv.y, uv.x);
+  float rr = uRings;
+  float ringIdx = floor(r*rr);
+  float ringFrac = fract(r*rr);
+  float secF = a/(2.0*PI) + 0.5;
+  float si = floor(secF*12.0);
+  float sf = fract(secF*12.0);
+  float ch = 0.0;
+  for(int k=0;k<12;k++) if(int(si)==k) ch = uChroma[k];
+  float ringEdge = smoothstep(0.02, 0.0, abs(ringFrac-0.5)-0.42);
+  float secEdge  = smoothstep(0.02, 0.0, abs(sf-0.5)-0.45);
+  float cell     = ringEdge * secEdge;
+  float bright = ch * (0.4 + 0.7*ringIdx/rr) + uBass*0.15;
+  float discMask = smoothstep(0.95, 0.85, r);
+  cell *= discMask;
+  float spokes = smoothstep(0.45, 0.5, abs(sf-0.5));
+  spokes = 1.0 - spokes;
+  spokes *= step(0.05, r);
+  float spokeBright = uDrum * 0.4 * spokes * smoothstep(0.95, 0.0, r);
+  float barLen = 0.08 + ch*0.25 + uBass*0.05;
+  float wedge = (1.0 - smoothstep(0.0, barLen, r)) * (1.0 - step(0.4, abs(sf-0.5)));
+  float outerRing = smoothstep(0.005, 0.0, abs(r-0.92));
+  outerRing *= 0.3 + uBeat*0.7;
+  vec3 col = vec3(0.0);
+  col += ramp(bright) * bright * cell * 1.3;
+  col += vec3(1.0,0.9,0.7) * spokeBright;
+  col += ramp(0.5+ch) * wedge * (0.6+ch);
+  col += vec3(0.7,0.85,1.0) * outerRing;
+  float dot_ = smoothstep(0.05+uBass*0.04, 0.0, r);
+  col += vec3(0.9,0.9,1.0) * dot_ * (0.3 + uBass*0.7);
+  float cross = smoothstep(0.001, 0.0, abs(uv.x)) + smoothstep(0.001, 0.0, abs(uv.y));
+  col += vec3(0.06)*cross;
+  col *= 1.0 - 0.35*length(uv*0.8);
+  float grain = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233)))*43758.5453);
+  col += (grain-0.5)*0.018;
+  col = pow(col, vec3(1.0/2.2));
+  outColor = vec4(col, uFade);
+}`;
+
+// ─── WebGL Boilerplate ───────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: false });
+if (!gl) { alert('WebGL2 not available'); throw new Error('WebGL2 required'); }
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src.replace(/version 300 es/g, '#version 300 es'));
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(sh));
+    throw new Error('Shader compile failed');
+  }
+  return sh;
+}
+
+function makeProgram(vs, fs) {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    throw new Error('Program link failed');
+  }
+  return prog;
+}
+
+const programs = [FS0, FS1, FS2, FS3].map(fs => makeProgram(VS, fs));
+const uniforms = programs.map(prog => {
+  const U = n => gl.getUniformLocation(prog, n);
+  const u = {
+    res: U('uRes'), t: U('uTime'), bass: U('uBass'), drum: U('uDrum'),
+    hi: U('uLeadHi'), beat: U('uBeat'), tint: U('uTint'), section: U('uSection'),
+    fade: U('uFade')
+  };
+  // Mode-specific extras
+  if (prog === programs[0]) { u.cam = U('uCamDist'); }
+  if (prog === programs[1]) { u.tz = U('uTunnelZ'); }
+  if (prog === programs[2]) { u.pulse = U('uPulse'); u.bc = U('uBallCount'); }
+  if (prog === programs[3]) {
+    u.rot = U('uRotation'); u.rings = U('uRings');
+    u.chroma = []; for (let k = 0; k < 12; k++) u.chroma.push(U('uChroma[' + k + ']'));
+  }
+  return u;
+});
+
+// Shared fullscreen quad
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+
+function bindQuad(prog) {
+  gl.useProgram(prog);
+  const ploc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(ploc);
+  gl.vertexAttribPointer(ploc, 2, gl.FLOAT, false, 0, 0);
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  canvas.width = innerWidth * dpr; canvas.height = innerHeight * dpr;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+addEventListener('resize', resize); resize();
+
+// ─── Data & Playback State ───────────────────────────────────────────────
+let DATA = null;
+let audio = document.getElementById('audio');
+let playing = false;
+let virtualT = 0;
+let lastTick = performance.now();
+let tunnelZ = 0;
+let pulse = 0;
+let rotation = 0;
+let lastBeatIdx = -1;
+let lastOnsetIdx = -1;
+
+// Crossfade state
+let currentMode = 0;
+let prevMode = 0;
+let crossfade = 1.0; // 1.0 = fully current, 0.0 = fully previous
+let crossfadeSpeed = 0.5; // per second
+
+// ─── File Upload Handling ──────────────────────────────────────────────────
+const overlay = document.getElementById('upload-overlay');
+const dropZone = document.getElementById('drop-zone');
+const uploadStatus = document.getElementById('upload-status');
+const btnStart = document.getElementById('btn-start');
+const fileMp3 = document.getElementById('file-mp3');
+const fileJson = document.getElementById('file-json');
+
+let mp3File = null;
+let jsonFile = null;
+
+function updateStatus() {
+  const hasMp3 = mp3File !== null;
+  const hasJson = DATA !== null;
+  if (hasMp3 && hasJson) {
+    uploadStatus.textContent = `✓ Ready: ${mp3File.name} + viz data`;
+    uploadStatus.className = 'status-msg ready';
+    btnStart.style.display = 'inline-block';
+  } else if (hasMp3) {
+    uploadStatus.textContent = `✓ MP3 loaded. Need viz_data_v2.json`;
+    uploadStatus.className = 'status-msg';
+    btnStart.style.display = 'none';
+  } else if (hasJson) {
+    uploadStatus.textContent = `✓ Viz data loaded. Need MP3`;
+    uploadStatus.className = 'status-msg';
+    btnStart.style.display = 'none';
+  } else {
+    uploadStatus.textContent = '';
+    btnStart.style.display = 'none';
+  }
+}
+
+function handleMp3(file) {
+  mp3File = file;
+  audio.src = URL.createObjectURL(file);
+  updateStatus();
+}
+
+function handleJson(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      DATA = JSON.parse(e.target.result);
+      uploadStatus.textContent = `✓ Loaded: ${DATA.duration?.toFixed(1)}s · ${DATA.fps}fps`;
+      uploadStatus.className = 'status-msg ready';
+      updateStatus();
+    } catch (err) {
+      uploadStatus.textContent = '✗ Invalid JSON';
+      uploadStatus.className = 'status-msg error';
+    }
+  };
+  reader.readAsText(file);
+  jsonFile = file;
+}
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  for (const f of e.dataTransfer.files) {
+    if (f.type.startsWith('audio/')) handleMp3(f);
+    else if (f.name.endsWith('.json')) handleJson(f);
+  }
+});
+
+document.getElementById('btn-mp3').onclick = () => fileMp3.click();
+document.getElementById('btn-json').onclick = () => fileJson.click();
+fileMp3.onchange = e => { if (e.target.files[0]) handleMp3(e.target.files[0]); };
+fileJson.onchange = e => { if (e.target.files[0]) handleJson(e.target.files[0]); };
+
+// Also try auto-loading viz_data_v2.json from same directory
+fetch('viz_data_v2.json')
+  .then(r => r.ok ? r.json() : Promise.reject('not found'))
+  .then(d => { DATA = d; updateStatus(); })
+  .catch(() => {});
+
+// ─── Start Visualization ───────────────────────────────────────────────────
+const playerUi = document.getElementById('player-ui');
+const topControls = document.getElementById('top-controls');
+
+btnStart.onclick = () => {
+  overlay.classList.add('hidden');
+  playerUi.classList.add('active');
+  topControls.classList.add('active');
+  playing = true;
+  lastTick = performance.now();
+  audio.play().catch(() => {});
+};
+
+// ─── Playback Controls ────────────────────────────────────────────────────
+const playBtn = document.getElementById('play-btn');
+const progressWrap = document.getElementById('progress-wrap');
+const progressBar = document.getElementById('progress-bar');
+const timeDisplay = document.getElementById('time-display');
+const sectionName = document.getElementById('section-name');
+const modeBadge = document.getElementById('mode-badge');
+
+playBtn.onclick = () => {
+  playing = !playing;
+  playBtn.textContent = playing ? '⏸' : '▶';
+  if (playing) { lastTick = performance.now(); audio.play().catch(() => {}); }
+  else audio.pause();
+};
+
+progressWrap.onclick = e => {
+  if (!audio.duration) return;
+  const rect = progressWrap.getBoundingClientRect();
+  const pct = (e.clientX - rect.left) / rect.width;
+  audio.currentTime = pct * audio.duration;
+  virtualT = pct * (DATA ? DATA.duration : audio.duration);
+};
+
+document.getElementById('rec-btn').onclick = () => {
+  playerUi.classList.toggle('active');
+  topControls.classList.toggle('active');
+  document.getElementById('rec-dot').classList.toggle('on');
+};
+
+document.getElementById('reset-btn').onclick = () => {
+  audio.pause(); playing = false;
+  overlay.classList.remove('hidden');
+  playerUi.classList.remove('active');
+  topControls.classList.remove('active');
+  document.getElementById('rec-dot').classList.remove('on');
+};
+
+// ─── Audio Feature Sampling ────────────────────────────────────────────────
+function sample(arr, t, dur) {
+  if (!arr || !arr.length) return 0;
+  const i = Math.min(arr.length - 1, Math.max(0, Math.floor(t / dur * arr.length)));
+  return arr[i];
+}
+
+function sampleChroma(t) {
+  if (!DATA) return [0.5, 0.5, 0.5];
+  const ch = DATA.stems.lead.chroma;
+  const dur = DATA.duration;
+  const i = Math.min(ch[0].length - 1, Math.floor(t / dur * ch[0].length));
+  let r = 0, g = 0, b = 0;
+  for (let k = 0; k < 12; k++) {
+    const v = ch[k][i];
+    const a = k / 12 * Math.PI * 2;
+    r += v * (0.5 + 0.5 * Math.cos(a));
+    g += v * (0.5 + 0.5 * Math.cos(a - 2.094));
+    b += v * (0.5 + 0.5 * Math.cos(a - 4.188));
+  }
+  const m = Math.max(r, g, b, 0.001);
+  return [r / m, g / m, b / m];
+}
+
+function chromaAt(t) {
+  if (!DATA) { const o = new Array(12).fill(0); o[0] = 0.5; return o; }
+  const ch = DATA.stems.lead.chroma, dur = DATA.duration;
+  const i = Math.min(ch[0].length - 1, Math.floor(t / dur * ch[0].length));
+  const out = new Array(12);
+  for (let k = 0; k < 12; k++) out[k] = ch[k][i];
+  return out;
+}
+
+function beatPulseDecay(t) {
+  if (!DATA) return 0;
+  const beats = DATA.beat_times;
+  for (let i = beats.length - 1; i >= 0; i--) {
+    if (beats[i] <= t && i % 4 === 0) return Math.exp(-(t - beats[i]) * 6);
+  }
+  return 0;
+}
+
+function checkBeatTick(t) {
+  if (!DATA) return false;
+  const beats = DATA.beat_times;
+  let lo = 0, hi = beats.length - 1, idx = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (beats[m] <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+  if (idx > lastBeatIdx && idx >= 0 && idx % 4 === 0 && t - beats[idx] < 0.15) {
+    lastBeatIdx = idx; return true;
+  }
+  return false;
+}
+
+function checkOnset(t) {
+  if (!DATA) return false;
+  const onsets = DATA.stems.drums.onset_times;
+  let lo = 0, hi = onsets.length - 1, idx = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (onsets[m] <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+  if (idx > lastOnsetIdx && idx >= 0 && t - onsets[idx] < 0.1) {
+    lastOnsetIdx = idx; return true;
+  }
+  return false;
+}
+
+function currentSection(t) {
+  if (!DATA) return { idx: 0, name: 'intro', start: 0, end: 100 };
+  for (let i = 0; i < DATA.sections.length; i++) {
+    const s = DATA.sections[i];
+    if (t >= s.start && t < s.end) return { idx: i, name: s.name, start: s.start, end: s.end };
+  }
+  const last = DATA.sections[DATA.sections.length - 1];
+  return { idx: DATA.sections.length - 1, name: last.name, start: last.start, end: last.end };
+}
+
+// ─── Render Loop ─────────────────────────────────────────────────────────
+function frame() {
+  const now = performance.now();
+  const dt = Math.min((now - lastTick) / 1000, 0.05); // cap dt
+  lastTick = now;
+  if (playing) virtualT += dt;
+  const t = audio.src ? audio.currentTime : virtualT;
+
+  // ── Sample audio features ──
+  let bass = 0.4, drum = 0, hi = 0.5, beat = 0, section = 0;
+  let tint = [0.5, 0.5, 0.5];
+  let chroma = new Array(12).fill(0.3);
+  let secInfo = { idx: 0, name: 'intro' };
+
+  if (DATA) {
+    const dur = DATA.duration;
+    bass = Math.min(1, sample(DATA.stems.bass.rms, t, dur) * 4);
+    drum = Math.min(1, sample(DATA.stems.drums.onset_env, t, dur) / 8);
+    hi = Math.min(1, Math.max(0, (sample(DATA.stems.lead.centroid_hz, t, dur) - 400) / 5600));
+    beat = beatPulseDecay(t);
+    tint = sampleChroma(t);
+    chroma = chromaAt(t);
+    secInfo = currentSection(t);
+    section = secInfo.idx;
+
+    // Mode-specific state updates
+    if (playing || audio.src) tunnelZ += dt * (0.4 + bass * 1.6);
+    if (checkOnset(t)) pulse = Math.min(1, pulse + 0.5);
+    if (checkBeatTick(t)) rotation += Math.PI / 24;
+  } else {
+    bass = 0.5 + 0.5 * Math.sin(t * 1.5);
+    drum = Math.max(0, Math.sin(t * 4)) * 0.6;
+    hi = 0.5 + 0.4 * Math.sin(t * 0.3);
+    beat = Math.exp(-(t % 1) * 8);
+    for (let k = 0; k < 12; k++) chroma[k] = 0.3 + 0.4 * Math.sin(t * 1.7 + k * 0.5);
+    if (playing) tunnelZ += dt * 0.8;
+    rotation += dt * 0.05;
+  }
+  pulse *= Math.exp(-dt * 5);
+  rotation += dt * 0.05;
+
+  // ── Determine target mode from section ──
+  const targetMode = SECTION_MAP[Math.min(section, SECTION_MAP.length - 1)];
+  if (targetMode !== currentMode) {
+    prevMode = currentMode;
+    currentMode = targetMode;
+    crossfade = 0.0;
+  }
+  crossfade = Math.min(1.0, crossfade + dt * crossfadeSpeed);
+
+  // ── Update UI ──
+  const totalDur = DATA ? DATA.duration : (audio.duration || 1);
+  const pct = Math.min(1, t / totalDur);
+  progressBar.style.width = (pct * 100) + '%';
+  const fmt = s => { const m = Math.floor(s / 60); const sec = Math.floor(s % 60); return m + ':' + (sec < 10 ? '0' : '') + sec; };
+  timeDisplay.textContent = fmt(t) + ' / ' + fmt(totalDur);
+  sectionName.textContent = secInfo.name;
+  modeBadge.textContent = MODES[currentMode].name;
+
+  // ── Render both modes if crossfading ──
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  // Render previous mode (fading out)
+  if (crossfade < 1.0) {
+    renderMode(prevMode, t, bass, drum, hi, beat, tint, section, chroma, 1.0 - crossfade);
+  }
+  // Render current mode (fading in)
+  renderMode(currentMode, t, bass, drum, hi, beat, tint, section, chroma, crossfade);
+
+  gl.disable(gl.BLEND);
+  requestAnimationFrame(frame);
+}
+
+function renderMode(modeIdx, t, bass, drum, hi, beat, tint, section, chroma, fadeAlpha) {
+  const prog = programs[modeIdx];
+  const u = uniforms[modeIdx];
+  bindQuad(prog);
+
+  gl.uniform2f(u.res, canvas.width, canvas.height);
+  gl.uniform1f(u.t, t);
+  gl.uniform1f(u.bass, bass);
+  gl.uniform1f(u.drum, drum);
+  gl.uniform1f(u.hi, hi);
+  gl.uniform1f(u.beat, beat);
+  gl.uniform3f(u.tint, tint[0], tint[1], tint[2]);
+  gl.uniform1f(u.section, section);
+  gl.uniform1f(u.fade, fadeAlpha);
+
+  // Mode-specific uniforms
+  if (modeIdx === 0) {
+    const camDist = [3.6, 3.2, 2.7, 2.9, 3.8, 2.6][section] || 3.0;
+    gl.uniform1f(u.cam, camDist);
+  }
+  if (modeIdx === 1) {
+    gl.uniform1f(u.tz, tunnelZ);
+  }
+  if (modeIdx === 2) {
+    gl.uniform1f(u.pulse, pulse);
+    const ballCount = [3, 4, 6, 7, 4, 5][section] || 5;
+    gl.uniform1f(u.bc, ballCount);
+  }
+  if (modeIdx === 3) {
+    gl.uniform1f(u.rot, rotation);
+    const ringsBySection = [5, 6, 8, 10, 6, 12];
+    gl.uniform1f(u.rings, ringsBySection[section] || 8);
+    for (let k = 0; k < 12; k++) gl.uniform1f(u.chroma[k], chroma[k]);
+  }
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+
+// Start loop
+frame();
+</script>
+</body>
+</html>
