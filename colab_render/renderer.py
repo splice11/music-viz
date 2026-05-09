@@ -35,39 +35,41 @@ def _make_ctx(verbose: bool = True):
     look like a software rasterizer. Raises with a clear message if none
     found, since otherwise rendering would silently fall back to ~1 fps.
     """
-    last_err = None
+    icds = sorted(glob.glob("/usr/share/glvnd/egl_vendor.d/*.json"))
+    nv_icd = [p for p in icds if "nvidia" in p.lower()]
+    if not nv_icd:
+        raise RuntimeError(
+            "No NVIDIA EGL ICD is registered. Found ICDs: "
+            f"{icds or '(none)'}.\n"
+            "Re-run the Setup cell — it must apt-install `libnvidia-gl-<MAJOR>` "
+            "matching the driver from `nvidia-smi`. Without that package, "
+            "libEGL has no NVIDIA backend and falls back to llvmpipe (~1 fps)."
+        )
+
+    software_renderers_seen = []
     for idx in range(8):
         try:
             ctx = moderngl.create_context(
                 standalone=True, backend="egl", require=330, device_index=idx,
             )
-        except Exception as e:
-            last_err = e
-            continue
+        except Exception:
+            # moderngl raises once we exceed the device count; stop scanning.
+            break
         renderer = ctx.info.get("GL_RENDERER", "?")
         vendor = ctx.info.get("GL_VENDOR", "?")
         if verbose:
             print(f"[colab_render] EGL device {idx}: {vendor} | {renderer}")
         if not _is_software(renderer):
             return ctx
+        software_renderers_seen.append(renderer)
         ctx.release()
 
-    # Last-resort fallback (default device). Warn loudly.
-    try:
-        ctx = moderngl.create_context(standalone=True, backend="egl", require=330)
-        renderer = ctx.info.get("GL_RENDERER", "?")
-        if _is_software(renderer):
-            raise RuntimeError(
-                f"Only software EGL device available (GL_RENDERER={renderer!r}). "
-                "On Colab: confirm Runtime → GPU is selected, then re-run the setup cell. "
-                "If this persists, check that /usr/share/glvnd/egl_vendor.d/ contains "
-                "an *nvidia*.json ICD."
-            )
-        return ctx
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to create a hardware EGL context. Last error: {last_err or e}"
-        )
+    raise RuntimeError(
+        "All EGL devices reported software rendering "
+        f"({software_renderers_seen!r}) even though an NVIDIA ICD is present. "
+        "This usually means libEGL_nvidia.so.0 isn't on the loader path. "
+        "Try restarting the runtime, then re-running the Setup cell."
+    )
 
 
 class Renderer:
