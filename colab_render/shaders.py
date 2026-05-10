@@ -116,29 +116,110 @@ float chromaHue(){
     return fract(atan(sy, sx) / TAU + 1.0);
 }
 
+// -----------------------------------------------------------------
+// Warp-FBM helpers (used by mode 0 intro and mode 4 breakdown).
+// fbm(p + fbm(p + fbm(p))) — Iquilezles' "warp" pattern.
+// -----------------------------------------------------------------
+float wf_rand(vec2 n){
+    return fract(sin(dot(n, vec2(12.9898, 4.1414)))*43758.5453);
+}
+float wf_noise(vec2 p){
+    vec2 ip = floor(p);
+    vec2 u = fract(p);
+    u = u*u*(3.0-2.0*u);
+    float res = mix(mix(wf_rand(ip), wf_rand(ip+vec2(1,0)), u.x),
+                    mix(wf_rand(ip+vec2(0,1)), wf_rand(ip+vec2(1,1)), u.x), u.y);
+    return res*res;
+}
+const mat2 WF_M = mat2(0.80, 0.60, -0.60, 0.80);
+float wf_fbm(vec2 p, float spd){
+    float f = 0.0;
+    f += 0.500000*wf_noise(p + spd); p = WF_M*p*2.02;
+    f += 0.031250*wf_noise(p);       p = WF_M*p*2.01;
+    f += 0.250000*wf_noise(p);       p = WF_M*p*2.03;
+    f += 0.125000*wf_noise(p);       p = WF_M*p*2.01;
+    f += 0.062500*wf_noise(p);       p = WF_M*p*2.04;
+    f += 0.015625*wf_noise(p + sin(spd));
+    return f/0.96875;
+}
+float wf_pattern(vec2 p, float spd, float warpAmt){
+    return wf_fbm(p + warpAmt*wf_fbm(p + warpAmt*wf_fbm(p, spd), spd), spd);
+}
+
+// -----------------------------------------------------------------
+// Starfield + nebula helpers (used by mode 4 breakdown and mode 5
+// outro's sky). Three parallax layers of stars + a low-frequency
+// dust band.
+// -----------------------------------------------------------------
+vec3 sf_starField(vec2 uv, float twinkle){
+    vec3 col = vec3(0.0);
+    for (int k = 0; k < 3; k++){
+        float fk = float(k);
+        float scale = mix(140.0, 720.0, fk*0.5);
+        vec2 g = uv * scale;
+        vec2 gi = floor(g);
+        vec2 gf = fract(g) - 0.5;
+        float h = hash12(gi + fk*17.7);
+        float thr = mix(0.991, 0.998, fk*0.5);
+        if (h > thr){
+            float bright = (h - thr) / (1.0 - thr);
+            // per-star slow shimmer + drum-driven sparkle
+            float ph = hash12(gi + 7.0);
+            float shimmer = 0.6 + 0.4*sin(u_time*1.7 + ph*TAU);
+            shimmer *= 1.0 + twinkle*1.6;
+            float spark = exp(-dot(gf, gf) * mix(60.0, 240.0, fk*0.5));
+            float tint = hash12(gi + fk*3.1);
+            vec3 c = mix(vec3(0.7, 0.85, 1.05), vec3(1.05, 0.9, 0.75), tint);
+            col += c * spark * bright * shimmer * mix(1.2, 0.5, fk*0.5);
+        }
+    }
+    return col;
+}
+vec3 sf_nebula(vec2 uv){
+    float a = fbm2(uv*1.5 + 4.7);
+    float b = fbm2(uv*3.2 - 2.1);
+    float n = pow(a*b, 1.4);
+    // dim cool nebula, warm-edged
+    vec3 c = mix(vec3(0.02, 0.04, 0.10), vec3(0.18, 0.10, 0.22), b);
+    return c * n * 0.7;
+}
+
 // =================================================================
-// MODE 0 — INTRO (original "cryogenic" cyan fog with light shafts)
+// MODE 0 — CYAN WARP INTRO
+// Merges the cryogenic cyan fog with the recursive domain-warp FBM
+// (fbm(p + fbm(p + fbm(p)))). Same vertical light shafts and bass
+// pulse from the original intro mode are kept for the dancing feel.
 // =================================================================
 vec3 mode_intro(vec2 uv){
     vec2 p = uv * vec2(u_res.x/u_res.y, 1.0);
-    float t = u_time * 0.08;
-    float n = warpedFbm(p*1.6 + vec2(t, -t*0.3), u_time);
-    n = pow(n, 1.4);
+    float spd = u_time*(0.18 + 0.30*u_globalRms);
+    float warpAmt = 1.1 + 0.5*u_bass;
+    // recursive warp gives richer, more organic shapes than warpedFbm alone
+    float n = wf_pattern(p*1.4, spd, warpAmt);
+    n = pow(n, 1.3);
 
+    // signature vertical light shafts from the original
     float shaft = 0.0;
     for (int i=0; i<4; i++){
         float fi = float(i);
-        float x = mod(p.x*0.5 + fi*0.31 + t*0.07, 1.0) - 0.5;
+        float x = mod(p.x*0.5 + fi*0.31 + spd*0.07, 1.0) - 0.5;
         shaft += exp(-pow(x*30.0,2.0)) * (0.4 + 0.6*sin(fi*1.7 + u_time*0.4));
     }
-    shaft *= 0.25 * (0.4 + u_otherRms*1.4);
+    shaft *= 0.30 * (0.4 + u_otherRms*1.4);
 
     float pulse = u_bassPunch * exp(-length(uv-0.5)*4.0);
-    vec3 col = mix(vec3(0.02,0.08,0.14), vec3(0.35,0.85,1.0), n);
-    col += vec3(0.4,0.7,1.0) * shaft;
-    col += vec3(0.6,0.9,1.0) * pulse * 0.6;
 
-    col *= mix(0.6, 1.1, smoothstep(0.0, 0.9, u_sectionT));
+    // cyan palette — cooler dark-to-bright ramp keyed off the warp value
+    vec3 cold = vec3(0.015, 0.06, 0.12);
+    vec3 warm = vec3(0.40, 0.90, 1.05);
+    vec3 col = mix(cold, warm, n);
+
+    // shafts and pulse keep the cyan tonality
+    col += vec3(0.45, 0.75, 1.05) * shaft;
+    col += vec3(0.6, 0.95, 1.10) * pulse * 0.65;
+
+    // breathing brightness with section progression
+    col *= mix(0.55, 1.15, smoothstep(0.0, 0.9, u_sectionT));
     return col;
 }
 
@@ -265,40 +346,54 @@ vec3 mode_protean(vec2 uv){
 }
 
 // =================================================================
-// MODE 2 — DROP (original magenta shockwave + particles)
+// MODE 2 — LENSED BLACK HOLE  (drop / impact)
+// Star field warped by gravitational lensing toward the centre, with
+// a hot accretion disk pumping on bass and a photon ring flashing on
+// drum hits. Tuned for "drop" energy — disk is bright and saturated.
 // =================================================================
-float drop_hash(vec2 p){ return hash12(p); }
 vec3 mode_drop(vec2 uv){
     vec2 p = (uv - 0.5) * vec2(u_res.x/u_res.y, 1.0);
+    float t = u_time;
     float r = length(p);
     float ang = atan(p.y, p.x);
 
-    float wave = 0.0;
-    for (int i=0; i<3; i++){
-        float fi = float(i);
-        float t = fract(u_time*0.4 + fi*0.33);
-        float radius = t * 1.2;
-        wave += exp(-pow((r - radius)*15.0, 2.0)) * (1.0 - t) * (0.6 + u_bass*1.5);
-    }
+    // event horizon size, swells with bass
+    float eh = 0.10 + u_bass * 0.05 + u_bassPunch * 0.025;
 
-    float parts = 0.0;
-    for (int i=0; i<6; i++){
-        float fi = float(i);
-        float seed = drop_hash(vec2(fi, 7.0));
-        float a = seed * TAU + sin(u_time*0.3 + fi)*0.4;
-        float life = fract(u_time*0.25 + seed);
-        vec2 pos = vec2(cos(a), sin(a)) * life * 1.5;
-        float d = length(p - pos);
-        parts += exp(-d*40.0) * (1.0 - life) * (0.5 + u_drumsPunch);
-    }
+    // lensing — pull radial sample inward + frame-dragging swirl
+    float k = 0.07 + u_bassPunch*0.05;
+    float warpedR = max(r - k / max(r, 0.01), 0.001);
+    float swirl = 0.85 / max(r, 0.05) + t*0.07;
+    vec2 sampleP = vec2(cos(ang + swirl), sin(ang + swirl)) * warpedR;
+    sampleP = sampleP*0.5 + 0.5;
 
-    float spiral = 0.5 + 0.5*sin(ang*6.0 + r*15.0 - u_time*2.0);
-    vec3 bg = mix(vec3(0.05,0.0,0.1), vec3(0.4,0.05,0.5), spiral);
+    vec3 stars = sf_starField(sampleP, 0.0);
+    stars += sf_nebula(sampleP*1.2 + 3.3) * 0.6;
 
-    vec3 col = bg;
-    col += vec3(1.0, 0.4, 0.9) * wave;
-    col += vec3(1.0, 0.95, 1.0) * parts * 1.5;
-    col += vec3(0.9, 0.2, 0.7) * u_bassPunch * 0.5;
+    // pure void inside the event horizon
+    if (r < eh) return vec3(0.0);
+
+    // accretion disk — bright thin annulus, hue stays warm (red→orange)
+    float diskInner = eh * 1.25;
+    float diskOuter = eh * 2.6;
+    float diskMask = smoothstep(diskInner, diskInner + 0.012, r) *
+                     smoothstep(diskOuter, diskOuter - 0.05, r);
+    float spots = 0.5 + 0.5*sin(ang*6.0 + t*1.6 + u_drumsPunch*4.0);
+    spots *= 0.5 + 0.5*fbm2(vec2(ang*3.0, r*22.0 + t*0.6));
+    float hue = fract(0.02 + 0.05*u_centroid);
+    vec3 diskCol = hsv(vec3(hue, 0.85, 1.0)) * (0.5 + 1.1*spots);
+    // doppler-ish brightening on one side
+    diskCol *= 0.5 + 0.85*(0.5 + 0.5*cos(ang));
+
+    // disk pumps on bass, photon ring flashes on drum hits
+    vec3 col = stars;
+    col += diskCol * diskMask * (0.9 + u_bass*1.3 + u_bassPunch*0.6);
+
+    float photon = exp(-pow((r - eh*1.08) / 0.005, 2.0));
+    col += vec3(1.10, 0.85, 0.6) * photon * (0.6 + u_drumsPunch*1.5);
+
+    // soft outer halo
+    col += diskCol * 0.10 * exp(-pow((r - eh*2.8)*3.0, 2.0));
     return col;
 }
 
@@ -639,53 +734,25 @@ vec3 mode_clouds(vec2 uv){
 }
 
 // =================================================================
-// MODE 4 — DOMAIN-WARPED FBM PATTERN  (Iquilezles "warp")
-// fbm(p + fbm(p + fbm(p))).  Music wiring:
-//   warp depth multiplier <- u_bass
-//   pattern speed         <- u_globalRms
-//   color shift           <- chromaHue, drum punch flash
+// MODE 4 — STARFIELD + NEBULA  (breakdown / pull-back)
+// Sparse drifting stars over a faint nebula. Drum punch makes stars
+// twinkle; bass adds a subtle ambient glow.
 // =================================================================
-float wf_rand(vec2 n){
-    return fract(sin(dot(n, vec2(12.9898, 4.1414)))*43758.5453);
-}
-float wf_noise(vec2 p){
-    vec2 ip = floor(p);
-    vec2 u = fract(p);
-    u = u*u*(3.0-2.0*u);
-    float res = mix(mix(wf_rand(ip), wf_rand(ip+vec2(1,0)), u.x),
-                    mix(wf_rand(ip+vec2(0,1)), wf_rand(ip+vec2(1,1)), u.x), u.y);
-    return res*res;
-}
-const mat2 WF_M = mat2(0.80, 0.60, -0.60, 0.80);
-float wf_fbm(vec2 p, float spd){
-    float f = 0.0;
-    f += 0.500000*wf_noise(p + spd); p = WF_M*p*2.02;
-    f += 0.031250*wf_noise(p);       p = WF_M*p*2.01;
-    f += 0.250000*wf_noise(p);       p = WF_M*p*2.03;
-    f += 0.125000*wf_noise(p);       p = WF_M*p*2.01;
-    f += 0.062500*wf_noise(p);       p = WF_M*p*2.04;
-    f += 0.015625*wf_noise(p + sin(spd));
-    return f/0.96875;
-}
-float wf_pattern(vec2 p, float spd, float warpAmt){
-    return wf_fbm(p + warpAmt*wf_fbm(p + warpAmt*wf_fbm(p, spd), spd), spd);
-}
+vec3 mode_starfield(vec2 uv){
+    // slow parallax drift
+    vec2 driftSlow = vec2(u_time*0.005, u_time*0.003);
+    vec2 driftFast = vec2(u_time*0.012, -u_time*0.008);
 
-vec3 mode_warp(vec2 uv){
-    // breakdown is meant to be sparse and tense — slow tempo, low brightness,
-    // chroma pushes the hue around so it still "dances".
-    float spd = u_time*(0.25 + 0.5*u_globalRms);
-    float warpAmt = 1.0 + 0.6*u_bass;
-    vec2 p = uv * vec2(u_res.x/u_res.y, 1.0) * 2.0;
-    float v = wf_pattern(p, spd, warpAmt);
+    vec3 stars = sf_starField(uv + driftFast, u_drumsPunch);
+    vec3 neb   = sf_nebula(uv*1.3 + driftSlow);
 
-    // hue from dominant chroma; saturation rides drums punch (a flash on hits)
-    float hue = chromaHue();
-    float sat = 0.55 + 0.35*u_drumsPunch;
-    vec3 col = hsv(vec3(hue, sat, pow(v, 1.4)));
-    col *= 0.45 + 0.7*u_globalRms;
-    // dimming so it reads as "breakdown" rather than a hero shot
-    col *= 0.7;
+    // bass gives a wide quiet ambient glow toward the centre
+    float r = length((uv-0.5)*vec2(u_res.x/u_res.y, 1.0));
+    vec3 ambient = vec3(0.08, 0.10, 0.16) * exp(-r*1.6) * (0.3 + u_bass*1.2);
+
+    vec3 col = stars + neb + ambient;
+    // breakdown reads as "quiet" — dim the whole field
+    col *= 0.8;
     return col;
 }
 
@@ -732,8 +799,28 @@ float sea_spec(vec3 n, vec3 l, vec3 e, float s){
     return pow(max(dot(reflect(e, n), l), 0.0), s)*nrm;
 }
 vec3 sea_getSkyColor(vec3 e){
-    e.y = (max(e.y, 0.0)*0.8 + 0.2)*0.8;
-    return vec3(pow(1.0-e.y, 2.0), 1.0-e.y, 0.6 + (1.0-e.y)*0.4) * 0.55;
+    // Night sky: deep navy fading to near-black overhead, faint cool horizon
+    // glow at the bottom, stars sprinkled across. The ray-direction projection
+    // (e.x, e.z, e.y) is mapped to a screen-space-ish plane for star sampling
+    // so reflections in the water naturally pick up reflected stars.
+    float h = clamp(e.y, -0.05, 1.0);
+    vec3 zenith  = vec3(0.005, 0.010, 0.022);
+    vec3 horizon = vec3(0.040, 0.060, 0.110);
+    vec3 col = mix(horizon, zenith, smoothstep(0.0, 0.6, h));
+
+    // very faint cool glow right at the horizon
+    col += vec3(0.05, 0.08, 0.14) * exp(-h*30.0) * 0.6;
+
+    // stars — only above horizon
+    if (h > 0.0){
+        // stable 2D parameterisation from view direction; small drift so they
+        // appear to move as the camera drifts
+        vec2 sUV = vec2(atan(e.z, e.x)/TAU + 0.5, h);
+        sUV += vec2(u_time*0.003, 0.0);
+        col += sf_starField(sUV, 0.0) * smoothstep(0.0, 0.15, h) * 0.9;
+        col += sf_nebula(sUV*0.8 + 1.7) * smoothstep(0.0, 0.4, h) * 0.4;
+    }
+    return col;
 }
 float sea_octave(vec2 uv, float choppy){
     uv += sea_noise(uv);
@@ -824,10 +911,12 @@ vec3 mode_seascape(vec2 uv){
     nuv = nuv*2.0 - 1.0;
     nuv.x *= u_res.x/u_res.y;
 
-    vec3 ang = vec3(sin(t*3.0)*0.1,
-                    sin(t)*0.2 + 0.3 + 0.05*u_beatPhase,
+    // tilted up so a sizable sky band is visible (the user wants night sky
+    // with stars). Lower camera height too — feels more "low over the water".
+    vec3 ang = vec3(sin(t*3.0)*0.08,
+                    sin(t)*0.10 - 0.05 + 0.04*u_beatPhase,
                     t);
-    vec3 ori = vec3(0.0, 3.5, t*5.0);
+    vec3 ori = vec3(0.0, 2.4, t*5.0);
     vec3 dir = normalize(vec3(nuv.xy, -2.0));
     dir.z += length(nuv) * 0.14;
     dir = normalize(dir) * sea_fromEuler(ang);
@@ -841,12 +930,10 @@ vec3 mode_seascape(vec2 uv){
     vec3 col = mix(sea_getSkyColor(dir),
                    sea_getColor(p, n, light, dir, dist),
                    pow(smoothstep(0.0, -0.02, dir.y), 0.2));
-    // donor's pow(0.65) is sRGB-ish encoding; linearize so our composite
-    // pipeline doesn't double-gamma. Then darken overall + cool-tint.
-    col = pow(col, vec3(0.65));
-    col = pow(max(col, 0.0), vec3(2.2));
+    // Night-sky version of getSkyColor is linear; no gamma reshape needed.
+    // Strong overall darken (the user said the original was too bright).
     col *= 0.45;
-    col *= vec3(0.85, 0.95, 1.10);
+    col *= vec3(0.80, 0.92, 1.15);   // cool-tint into night blue
     return col;
 }
 
@@ -858,7 +945,7 @@ vec3 dispatch(int mode, vec2 uv){
     if (mode == 1) return mode_protean(uv);
     if (mode == 2) return mode_drop(uv);
     if (mode == 3) return mode_clouds(uv);
-    if (mode == 4) return mode_warp(uv);
+    if (mode == 4) return mode_starfield(uv);
     return mode_seascape(uv);
 }
 
