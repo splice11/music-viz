@@ -166,7 +166,7 @@ class Renderer:
         self.ctx.clear(0, 0, 0, 1)
         self.fb_scene.color_attachments[0].use(location=0)
         self._set_uniform(self.bright_prog, "u_tex", 0)
-        self._set_uniform(self.bright_prog, "u_threshold", 0.7)
+        self._set_uniform(self.bright_prog, "u_threshold", 0.85)
         self.bright_vao.render(moderngl.TRIANGLES, vertices=3)
 
         # ---- 3. Separable gaussian (H then V) ----
@@ -208,10 +208,12 @@ class Renderer:
         self._set_uniform(cp, "u_bloom", 1)
         self._set_uniform(cp, "u_time", float(t))
         # ramp post-FX with energy: more bloom in drops, tighter CA
+        # bloom is kept lean — the new shaders are raymarched and have real
+        # silhouettes; heavy bloom would put the fog right back.
         energy = float(fd.global_rms[i])
-        bloom_amt = 0.55 + 0.6 * energy
-        ca_amt = 0.0015 + 0.005 * energy
-        grain_amt = 0.04
+        bloom_amt = 0.30 + 0.45 * energy
+        ca_amt = 0.0010 + 0.004 * energy
+        grain_amt = 0.035
         vignette = 0.55
         exposure = 1.05 + 0.25 * energy
         self._set_uniform(cp, "u_bloomAmt", bloom_amt)
