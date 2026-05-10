@@ -9,14 +9,15 @@ from __future__ import annotations
 import os, sys, time, subprocess, glob
 import numpy as np
 
-# Force libEGL to load only the NVIDIA ICD on Colab GPU runtimes. apt's libegl1
-# installs Mesa's ICD too, and the default device-selection often picks
-# llvmpipe (software), pinning the renderer to ~1 fps. We must set this before
-# moderngl/libEGL is loaded, so it lives at module top.
+# On Colab GPU runtimes apt's libegl1 installs Mesa's ICD alongside NVIDIA's
+# and the default device-selection often picks llvmpipe (software), pinning
+# the renderer to ~1 fps. When an NVIDIA ICD is present, force libEGL to load
+# only that one so we get the GPU. On other systems (Fedora/AMD/Intel) we
+# leave libEGL alone so it can pick up the system Mesa ICD (radeonsi/iris).
 _NV_ICDS = [p for p in glob.glob("/usr/share/glvnd/egl_vendor.d/*nvidia*.json")]
 if _NV_ICDS and "__EGL_VENDOR_LIBRARY_FILENAMES" not in os.environ:
     os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = ":".join(_NV_ICDS)
-os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+    os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 
 import moderngl
 from . import shaders
@@ -29,23 +30,14 @@ def _is_software(renderer_str: str) -> bool:
 
 
 def _make_ctx(verbose: bool = True):
-    """Create a standalone EGL OpenGL 3.3 context bound to the NVIDIA GPU.
+    """Create a standalone EGL OpenGL 3.3 context on the GPU.
 
     Iterates EGL devices and picks the first one whose GL_RENDERER doesn't
-    look like a software rasterizer. Raises with a clear message if none
-    found, since otherwise rendering would silently fall back to ~1 fps.
+    look like a software rasterizer. Works with NVIDIA's libEGL_nvidia and
+    Mesa's libEGL_mesa (radeonsi for AMD, iris for Intel, etc.). Raises if
+    everything is software, since otherwise rendering would silently fall
+    back to ~1 fps.
     """
-    icds = sorted(glob.glob("/usr/share/glvnd/egl_vendor.d/*.json"))
-    nv_icd = [p for p in icds if "nvidia" in p.lower()]
-    if not nv_icd:
-        raise RuntimeError(
-            "No NVIDIA EGL ICD is registered. Found ICDs: "
-            f"{icds or '(none)'}.\n"
-            "Re-run the Setup cell — it must apt-install `libnvidia-gl-<MAJOR>` "
-            "matching the driver from `nvidia-smi`. Without that package, "
-            "libEGL has no NVIDIA backend and falls back to llvmpipe (~1 fps)."
-        )
-
     software_renderers_seen = []
     for idx in range(8):
         try:
@@ -64,11 +56,14 @@ def _make_ctx(verbose: bool = True):
         software_renderers_seen.append(renderer)
         ctx.release()
 
+    icds = sorted(glob.glob("/usr/share/glvnd/egl_vendor.d/*.json"))
     raise RuntimeError(
         "All EGL devices reported software rendering "
-        f"({software_renderers_seen!r}) even though an NVIDIA ICD is present. "
-        "This usually means libEGL_nvidia.so.0 isn't on the loader path. "
-        "Try restarting the runtime, then re-running the Setup cell."
+        f"({software_renderers_seen!r}). Registered EGL ICDs: "
+        f"{icds or '(none)'}.\n"
+        "On Fedora make sure mesa-libEGL is installed and the system Mesa "
+        "ICD (e.g. /usr/share/glvnd/egl_vendor.d/50_mesa.json) is present. "
+        "On Colab, re-run the Setup cell so libnvidia-gl-<MAJOR> is installed."
     )
 
 
