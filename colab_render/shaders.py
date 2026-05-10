@@ -19,6 +19,8 @@ name collisions across modes. Music response is added on top of the donor
 shaders rather than baked in, so the visual base stays close to source.
 """
 
+from .kerr_shader import KERR_SOURCE
+
 # Shared fullscreen-triangle vertex shader.
 FULLSCREEN_VS = """
 #version 330
@@ -311,90 +313,54 @@ vec3 mode_protean(vec2 uv){
     vec2 q = uv;
     vec2 p = (uv - 0.5) * vec2(u_res.x/u_res.y, 1.0);
 
-    // Donor's natural prm1 oscillation kept; music nudges (a touch faster
-    // morph on energy, slight phase push from centroid).
-    float morphPhase = u_time*(0.30 + 0.20*u_globalRms) + u_centroid*1.6;
+    // Music response goes into shape/colour, not into the camera path.
+    // prm1 (morph factor) takes the strongest energy hook; bass widens the
+    // tunnel by raising bsMo (smooth signal, not the impulsive punch).
+    float morphPhase = u_time*0.32 + u_centroid*1.6;
     float prm1 = smoothstep(-0.4, 0.4, sin(morphPhase));
-    // bass punch pushes the camera offset, which displaces the volume centre
-    vec2 bsMo = vec2(0.0, -0.05 - 0.45*u_bassPunch);
+    prm1 = clamp(prm1 + 0.25*u_bass + 0.10*u_globalRms, 0.0, 1.0);
+    vec2 bsMo = vec2(0.0, -0.05 - 0.30*u_bass);
 
-    float speedBoost = 1.0 + 1.4*u_globalRms;
+    // Steady forward flight. A tiny smooth lift on global RMS instead of
+    // the jerky punch-driven boost — the camera shouldn't twitch on hits.
+    float speedBoost = 1.0 + 0.35*u_globalRms;
     float time = u_time*3.0*speedBoost;
 
     vec3 ro = vec3(0,0,time);
-    ro += vec3(sin(u_time)*0.5, 0.0, 0.0);
+    ro += vec3(sin(u_time*0.7)*0.4, 0.0, 0.0);
     float dspAmp = 0.85;
     ro.xy += pc_disp(ro.z)*dspAmp;
     float tgtDst = 3.5;
 
     vec3 target = normalize(ro - vec3(pc_disp(time + tgtDst)*dspAmp, time + tgtDst));
-    ro.x -= bsMo.x*2.0;
     vec3 rightdir = normalize(cross(target, vec3(0,1,0)));
     vec3 updir = normalize(cross(rightdir, target));
     rightdir = normalize(cross(updir, target));
     vec3 rd = normalize((p.x*rightdir + p.y*updir)*1.0 - target);
-    rd.xy *= pc_rot(-pc_disp(time + 3.5).x*0.2 + bsMo.x);
+    rd.xy *= pc_rot(-pc_disp(time + 3.5).x*0.2);
 
     vec4 scn = pc_render(ro, rd, time, prm1, bsMo);
     vec3 col = scn.rgb;
-    col = pc_iLerp(col.bgr, col.rgb, clamp(1.0 - prm1, 0.05, 1.0));
-    // Apply donor's grading (matches the original Shadertoy look), then
-    // linearize so our composite's sRGB encode doesn't double-gamma it.
+    // Music-driven palette flips: bass pushes us toward warmer tones,
+    // centroid shifts hue blend without touching the camera.
+    float colMix = clamp(1.0 - prm1 + 0.25*u_centroid, 0.05, 1.0);
+    col = pc_iLerp(col.bgr, col.rgb, colMix);
     col = pow(col, vec3(0.55, 0.65, 0.6))*vec3(1.0, 0.97, 0.9);
     col = pow(max(col, 0.0), vec3(2.2));
+    // gentle bass-driven brightness/saturation pulse, smooth signal only.
+    col *= 1.0 + 0.35*u_bass;
     return col;
 }
 
 // =================================================================
-// MODE 2 — LENSED BLACK HOLE  (drop / impact)
-// Star field warped by gravitational lensing toward the centre, with
-// a hot accretion disk pumping on bass and a photon ring flashing on
-// drum hits. Tuned for "drop" energy — disk is bright and saturated.
+// MODE 2 — KERR-NEWMAN BLACK HOLE
+// Single-pass adaptation of the wXdfzj Kerr-Newman GR ray-tracer
+// (Section 1-7 inlined below as KERR_SOURCE). Mouse/keyboard camera
+// state and TAA history are replaced with a smooth synthesized orbit.
 // =================================================================
+// __KERR_INJECT__
 vec3 mode_drop(vec2 uv){
-    vec2 p = (uv - 0.5) * vec2(u_res.x/u_res.y, 1.0);
-    float t = u_time;
-    float r = length(p);
-    float ang = atan(p.y, p.x);
-
-    // event horizon size, swells with bass
-    float eh = 0.10 + u_bass * 0.05 + u_bassPunch * 0.025;
-
-    // lensing — pull radial sample inward + frame-dragging swirl
-    float k = 0.07 + u_bassPunch*0.05;
-    float warpedR = max(r - k / max(r, 0.01), 0.001);
-    float swirl = 0.85 / max(r, 0.05) + t*0.07;
-    vec2 sampleP = vec2(cos(ang + swirl), sin(ang + swirl)) * warpedR;
-    sampleP = sampleP*0.5 + 0.5;
-
-    vec3 stars = sf_starField(sampleP, 0.0);
-    stars += sf_nebula(sampleP*1.2 + 3.3) * 0.6;
-
-    // pure void inside the event horizon
-    if (r < eh) return vec3(0.0);
-
-    // accretion disk — bright thin annulus, hue stays warm (red→orange)
-    float diskInner = eh * 1.25;
-    float diskOuter = eh * 2.6;
-    float diskMask = smoothstep(diskInner, diskInner + 0.012, r) *
-                     smoothstep(diskOuter, diskOuter - 0.05, r);
-    float spots = 0.5 + 0.5*sin(ang*6.0 + t*1.6 + u_drumsPunch*4.0);
-    spots *= 0.5 + 0.5*fbm2(vec2(ang*3.0, r*22.0 + t*0.6));
-    float hue = fract(0.02 + 0.05*u_centroid);
-    vec3 diskCol = hsv(vec3(hue, 0.85, 1.0)) * (0.5 + 1.1*spots);
-    // doppler-ish brightening on one side
-    diskCol *= 0.5 + 0.85*(0.5 + 0.5*cos(ang));
-
-    // disk pumps on bass, photon ring flashes on drum hits
-    vec3 col = stars;
-    col += diskCol * diskMask * (0.9 + u_bass*1.3 + u_bassPunch*0.6);
-
-    float photon = exp(-pow((r - eh*1.08) / 0.005, 2.0));
-    col += vec3(1.10, 0.85, 0.6) * photon * (0.6 + u_drumsPunch*1.5);
-
-    // soft outer halo
-    col += diskCol * 0.10 * exp(-pow((r - eh*2.8)*3.0, 2.0));
-    return col;
+    return kn_blackhole(uv);
 }
 
 // =================================================================
@@ -414,8 +380,8 @@ const int   CL_MAX_STEPS = 32;
 const float CL_MIN_DIST = 0.1;
 const float CL_MAX_DIST = 1000.0;
 const float CL_EPSILON = 1e-4;
-const int   CL_STEPS_PRIMARY = 24;
-const int   CL_STEPS_LIGHT = 6;
+const int   CL_STEPS_PRIMARY = 56;
+const int   CL_STEPS_LIGHT = 8;
 const vec3  CL_BOLT_COLOUR = vec3(0.30, 0.6, 1.0);
 const vec3  CL_HORIZON = vec3(1.0, 0.9, 0.8);
 const vec3  CL_SKY = vec3(0.0);
@@ -687,16 +653,18 @@ vec3 mode_clouds(vec2 uv){
     vec2 fragCoord = uv * u_res;
     vec3 rd0;
     {
-        // 40 deg field of view
+        // wider FOV so the full cloud silhouette fits comfortably in frame
         vec2 xy = fragCoord - u_res*0.5;
-        float z = (0.5*u_res.y) / tan(radians(40.0)*0.5);
+        float z = (0.5*u_res.y) / tan(radians(55.0)*0.5);
         rd0 = normalize(vec3(xy, -z));
     }
 
-    // Camera flies in a slow horizontal arc 6 units high, looking at the cloud center.
-    // Bass adds a subtle vertical sway.
+    // Steady, slow horizontal arc. Camera sits at the cloud's mid-height and
+    // far enough back that the body fits in frame at 55° FOV. Tiny smooth
+    // bass sway only — no jerky offsets.
     float ct = u_time*0.07;
-    vec3 ro = vec3(sin(ct)*8.0, 6.0 + sin(u_time*0.4)*0.4*u_bass, -38.0 + cos(ct)*4.0);
+    float camR = 50.0;
+    vec3 ro = vec3(sin(ct)*camR, CL_CLOUD_START + CL_CLOUD_HEIGHT*0.5 + sin(u_time*0.3)*0.6*u_bass, -cos(ct)*camR);
     vec3 target = vec3(0.0, CL_CLOUD_START + CL_CLOUD_HEIGHT*0.5, 0.0) - ro;
 
     vec3 zaxis = normalize(target);
@@ -716,7 +684,10 @@ vec3 mode_clouds(vec2 uv){
 
     float totalT = 1.0;
     float exposure = 0.5 + 0.4*u_globalRms;
-    vec3 sunDir = normalize(vec3(1.0 + 0.4*sin(u_time*0.05 + u_bass), 1.0, 1.0));
+    // Sun light orbits the cloud continuously and faster than the camera so
+    // the lit side keeps sweeping across.
+    float sunT = u_time*0.9;
+    vec3 sunDir = normalize(vec3(cos(sunT), 0.55, sin(sunT)));
     float mu = 0.5 + 0.5*dot(rd, sunDir);
     float dCloud = 1e10;
     vec3 col = exposure * cl_mainRay(ro, rd, sunDir, totalT, mu, offset, dCloud, b0, b1, b2);
@@ -898,7 +869,7 @@ float sea_trace(vec3 ori, vec3 dir, out vec3 p){
 }
 
 vec3 mode_seascape(vec2 uv){
-    // music-driven sea state
+    // music-driven sea state — wave geometry / chop / flow, not the camera.
     SEA_HEIGHT = 0.45 + 0.55*u_bass;
     SEA_CHOPPY = 3.0 + 2.5*u_drumsRms;
     SEA_SPEED  = 0.45 + 0.6*u_globalRms;
@@ -911,12 +882,16 @@ vec3 mode_seascape(vec2 uv){
     nuv = nuv*2.0 - 1.0;
     nuv.x *= u_res.x/u_res.y;
 
-    // tilted up so a sizable sky band is visible (the user wants night sky
-    // with stars). Lower camera height too — feels more "low over the water".
-    vec3 ang = vec3(sin(t*3.0)*0.08,
-                    sin(t)*0.10 - 0.05 + 0.04*u_beatPhase,
-                    t);
-    vec3 ori = vec3(0.0, 2.4, t*5.0);
+    // Steady, slow camera flow. No beat/punch-driven angles — those caused
+    // the camera to jerk and dip toward the water on heavy bass. Bias the
+    // pitch upward so the horizon stays in frame and the camera can't look
+    // far enough down to fall into the waves.
+    vec3 ang = vec3(sin(t*0.7)*0.05,
+                    0.06 + sin(t*0.4)*0.04,
+                    sin(t*0.6)*0.10);
+    // Higher camera so big bass-driven crests can't reach the lens.
+    float camH = 3.6 + 1.4*u_bass;
+    vec3 ori = vec3(0.0, camH, t*5.0);
     vec3 dir = normalize(vec3(nuv.xy, -2.0));
     dir.z += length(nuv) * 0.14;
     dir = normalize(dir) * sea_fromEuler(ang);
@@ -953,22 +928,8 @@ void main(){
     vec3 col = dispatch(u_modeA, v_uv);
     if (u_modeBlend > 0.001){
         vec3 b = dispatch(u_modeB, v_uv);
-
-        // Noise-dissolve: a slow-moving warped FBM acts as a per-pixel
-        // threshold so the new mode breaks through in organic blobs rather
-        // than a uniform fade. A bright edge glow on the dissolve front
-        // makes the cut feel like a wipe.
-        vec2 dp = v_uv * vec2(u_res.x/u_res.y, 1.0);
-        float n = warpedFbm(dp*3.5 + vec2(0.0, u_time*0.15), u_time*0.5);
-        float blend = u_modeBlend;
-        float edge = 0.10;
-        float t = smoothstep(blend - edge, blend + edge, n);
-        col = mix(col, b, 1.0 - t);
-
-        // glow band at the dissolve front, brightest mid-transition
-        float front = exp(-pow((n - blend)/edge*1.4, 2.0));
-        float pulse = sin(blend*PI);   // 0 at start/end, 1 in middle
-        col += vec3(0.45, 0.65, 1.0) * front * pulse * 0.55;
+        float t = smoothstep(0.0, 1.0, u_modeBlend);
+        col = mix(col, b, t);
     }
 
     // gentle global beat-phase brightness lift
@@ -977,6 +938,79 @@ void main(){
     frag = vec4(col, 1.0);
 }
 """
+
+# ---------------------------------------------------------------------------
+# Kerr-Newman black hole injection.
+#
+# The wXdfzj Shadertoy is a multi-buffer GR renderer with TAA history and
+# mouse/keyboard-driven camera state. We strip the buffer-state lookups and
+# the antiverse "matrix rain" background, then alias Shadertoy globals
+# (iTime, iResolution, iFrame) to the offline renderer's uniforms. A
+# synthesized smooth orbit feeds TraceRay in place of BufferB camera state.
+# ---------------------------------------------------------------------------
+_KERR_DEFINES = r"""
+// --- Shadertoy → offline-renderer aliases ---
+#define iTime        u_time
+#define iResolution  vec3(u_res, 0.0)
+#define iFrame       0
+"""
+
+_KN_BLACKHOLE_ADAPTER = r"""
+// --- Synthesized smooth-orbit camera + entry point for Mode 2 ---
+vec3 kn_blackhole(vec2 uv) {
+    vec2 iResolution2 = u_res;
+
+    // Steady, slow horizontal orbit. Camera distance is the only music hook
+    // (smooth bass only), so the camera never twitches on hits.
+    float orbT     = u_time * 0.05;
+    float camDist  = 22.0 - 1.5 * u_bass;
+    float camLat   = -3.6 + 1.0 * sin(u_time * 0.07);
+    vec3 CamPosWorld   = vec3(camDist * sin(orbT), camLat, camDist * cos(orbT));
+    vec3 fwd           = normalize(vec3(0.0, 0.5, 0.0) - CamPosWorld);
+    vec3 worldUp       = vec3(-0.3, 1.0, 0.0);
+    vec3 CamRightWorld = normalize(cross(fwd, worldUp));
+    vec3 CamUpWorld    = normalize(cross(CamRightWorld, fwd));
+    vec3 CamBackWorld  = normalize(cross(CamRightWorld, CamUpWorld));
+
+    mat3 CamRotMat = mat3(CamRightWorld, CamUpWorld, CamBackWorld);
+    mat4 iInverseCamRot = mat4(CamRotMat);
+
+    vec3 RelPos        = transpose(CamRotMat) * (-CamPosWorld);
+    vec3 DiskNormal    = vec3(0.0, 1.0, 0.0);
+    vec3 DiskTangent   = vec3(1.0, 0.0, 0.0);
+    vec3 RelNormal     = transpose(CamRotMat) * DiskNormal;
+    vec3 RelTangent    = transpose(CamRotMat) * DiskTangent;
+
+    vec4 iBlackHoleRelativePosRs       = vec4(RelPos, 0.0);
+    vec4 iBlackHoleRelativeDiskNormal  = vec4(RelNormal, 0.0);
+    vec4 iBlackHoleRelativeDiskTangen  = vec4(RelTangent, 0.0);
+    float iUniverseSign                = 1.0;
+
+    TraceResult res = TraceRay(uv, iResolution2,
+                               iInverseCamRot,
+                               iBlackHoleRelativePosRs,
+                               iBlackHoleRelativeDiskNormal,
+                               iBlackHoleRelativeDiskTangen,
+                               iUniverseSign);
+
+    vec4 FinalColor = res.AccumColor;
+    if (res.Status > 0.5 && res.Status < 2.5) {
+        vec4 Bg = SampleBackground(res.EscapeDir, res.FreqShift, res.Status);
+        FinalColor += 0.9999 * Bg * vec4(
+            pow((1.0 - FinalColor.a), 1.0),
+            pow((1.0 - FinalColor.a), 1.6),
+            pow((1.0 - FinalColor.a), 2.5),
+            1.0);
+    }
+    FinalColor = ApplyToneMapping(FinalColor, res.FreqShift);
+    return max(FinalColor.rgb, 0.0) * (1.0 + 0.4 * u_globalRms);
+}
+"""
+
+SCENE_FS = SCENE_FS.replace(
+    "// __KERR_INJECT__",
+    _KERR_DEFINES + KERR_SOURCE + _KN_BLACKHOLE_ADAPTER,
+)
 
 # ---------------------------------------------------------------------------
 # Bright extract for bloom.

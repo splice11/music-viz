@@ -213,7 +213,7 @@ class Renderer:
         energy = float(fd.global_rms[i])
         bloom_amt = 0.30 + 0.45 * energy
         ca_amt = 0.0010 + 0.004 * energy
-        grain_amt = 0.035
+        grain_amt = 0.0
         vignette = 0.55
         exposure = 1.05 + 0.25 * energy
         self._set_uniform(cp, "u_bloomAmt", bloom_amt)
