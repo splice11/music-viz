@@ -188,40 +188,64 @@ vec3 sf_nebula(vec2 uv){
 
 // =================================================================
 // MODE 0 — CYAN WARP INTRO
-// Merges the cryogenic cyan fog with the recursive domain-warp FBM
-// (fbm(p + fbm(p + fbm(p)))). Same vertical light shafts and bass
-// pulse from the original intro mode are kept for the dancing feel.
+// Pattern stays spatially fixed (no beat-driven forward scroll).
+// Music response lives entirely in color/brightness:
+//   - bass pulse brightens and saturates the pattern
+//   - beat phase drives a colour-hue rotation (ripple-like colour wave)
+//   - dark regions are pushed darker (gamma crush below mid-tone)
 // =================================================================
 vec3 mode_intro(vec2 uv){
     vec2 p = uv * vec2(u_res.x/u_res.y, 1.0);
-    float spd = u_time*(0.18 + 0.30*u_globalRms);
-    float warpAmt = 1.1 + 0.5*u_bass;
-    // recursive warp gives richer, more organic shapes than warpedFbm alone
-    float n = wf_pattern(p*1.4, spd, warpAmt);
-    n = pow(n, 1.3);
 
-    // signature vertical light shafts from the original
+    // Very slow spatial drift only — pattern does NOT scroll with beat.
+    float driftSpd = u_time * 0.06;
+    // Warp amount breathes slowly with bass (shape morphs, camera stays still).
+    float warpAmt = 1.1 + 0.4*u_bass;
+    float n = wf_pattern(p*1.4, driftSpd, warpAmt);
+
+    // Push the contrast: darks get crushed, brights stay bright.
+    // gamma < 1 lifts; gamma > 1 crushes darks. We want crushed darks.
+    n = pow(max(n, 0.0), 1.8);   // darker crush than the old 1.3
+    // extra contrast: remap 0..0.55 -> 0..0, 0.55..1 -> 0..1
+    n = smoothstep(0.18, 1.0, n);
+
+    // Vertical light shafts — fixed in x, only brightness oscillates.
     float shaft = 0.0;
     for (int i=0; i<4; i++){
         float fi = float(i);
-        float x = mod(p.x*0.5 + fi*0.31 + spd*0.07, 1.0) - 0.5;
-        shaft += exp(-pow(x*30.0,2.0)) * (0.4 + 0.6*sin(fi*1.7 + u_time*0.4));
+        float sx = p.x*0.5 + fi*0.31;           // no spd term → fixed position
+        float x = mod(sx, 1.0) - 0.5;
+        shaft += exp(-pow(x*28.0,2.0)) * (0.35 + 0.65*sin(fi*1.7 + u_time*0.35));
     }
-    shaft *= 0.30 * (0.4 + u_otherRms*1.4);
+    shaft *= 0.28 * (0.3 + u_otherRms*1.2);
 
-    float pulse = u_bassPunch * exp(-length(uv-0.5)*4.0);
+    // ---- Colour pulsing (replaces forward movement) ----
+    // beatPhase 0→1 per beat; use it to rotate the colour hue.
+    float beatAngle = u_beatPhase * TAU;
+    // hue shift: smoothly oscillate between cyan and a cooler blue-violet.
+    float hueShift  = sin(beatAngle) * 0.12;    // ±0.12 of the hue wheel
+    // brightness flash on the beat (bassPunch is the transient spike)
+    float beatFlash = u_bassPunch * 0.55 * exp(-length(uv - 0.5)*3.5);
 
-    // cyan palette — cooler dark-to-bright ramp keyed off the warp value
-    vec3 cold = vec3(0.015, 0.06, 0.12);
-    vec3 warm = vec3(0.40, 0.90, 1.05);
-    vec3 col = mix(cold, warm, n);
+    // Base cyan palette — dark cold, bright warm.
+    vec3 cold = vec3(0.004, 0.010, 0.022);       // near-black blue
+    vec3 warm = vec3(0.35 + hueShift*0.5, 0.85, 1.05 - hueShift*0.3);
+    vec3 col  = mix(cold, warm, n);
 
-    // shafts and pulse keep the cyan tonality
-    col += vec3(0.45, 0.75, 1.05) * shaft;
-    col += vec3(0.6, 0.95, 1.10) * pulse * 0.65;
+    // Bass breathing: multiply brightness, don't add (preserves dark spots).
+    col *= 1.0 + 0.50*u_bass;
 
-    // breathing brightness with section progression
-    col *= mix(0.55, 1.15, smoothstep(0.0, 0.9, u_sectionT));
+    // Shaft add (preserves dark zones outside shafts).
+    col += vec3(0.40 + hueShift, 0.72, 1.02) * shaft;
+
+    // Beat flash — additive so dark regions stay dark and bright ones bloom.
+    col += vec3(0.50, 0.88, 1.10) * beatFlash;
+
+    // Section progression fade-in.
+    col *= mix(0.45, 1.10, smoothstep(0.0, 0.9, u_sectionT));
+
+    // Final gamma crush to push blacks even deeper.
+    col = col * col * (3.0 - 2.0*col);   // smoothstep-ish contrast S-curve
     return col;
 }
 
@@ -314,17 +338,19 @@ vec3 mode_protean(vec2 uv){
     vec2 p = (uv - 0.5) * vec2(u_res.x/u_res.y, 1.0);
 
     // Music response goes into shape/colour, not into the camera path.
-    // prm1 (morph factor) takes the strongest energy hook; bass widens the
-    // tunnel by raising bsMo (smooth signal, not the impulsive punch).
     float morphPhase = u_time*0.32 + u_centroid*1.6;
     float prm1 = smoothstep(-0.4, 0.4, sin(morphPhase));
     prm1 = clamp(prm1 + 0.25*u_bass + 0.10*u_globalRms, 0.0, 1.0);
-    vec2 bsMo = vec2(0.0, -0.05 - 0.30*u_bass);
+    vec2 bsMo = vec2(0.0, -0.05 - 0.18*u_bass);
 
-    // Steady forward flight. A tiny smooth lift on global RMS instead of
-    // the jerky punch-driven boost — the camera shouldn't twitch on hits.
-    float speedBoost = 1.0 + 0.35*u_globalRms;
-    float time = u_time*3.0*speedBoost;
+    // Smooth monotonically-increasing time. Speed is modulated by a
+    // low-frequency envelope of globalRms so it never reverses. We use
+    // a soft sine of u_time to give a gentle rhythmic variation instead
+    // of tracking instantaneous RMS (which can drop/spike per beat).
+    float speedEnv = 1.0 + 0.28 * (0.5 + 0.5*sin(u_time*0.55));
+    // Add a slow music-driven lift that can only ever make things faster.
+    speedEnv += 0.22 * clamp(u_globalRms, 0.0, 1.0);
+    float time = u_time * 3.0 * speedEnv;
 
     vec3 ro = vec3(0,0,time);
     ro += vec3(sin(u_time*0.7)*0.4, 0.0, 0.0);
@@ -368,14 +394,17 @@ vec3 mode_drop(vec2 uv){
 // Music wiring:
 //   strikeFrequency       <- u_drumsPunch
 //   bolt impact radius    <- u_bassPunch
-//   internalFrequency     <- u_drumsPunch
+//   internalFrequency     <- u_drumsPunch (more flashes on beat)
 //   density multiplier    <- u_otherRms
 //   sun direction sway    <- u_bass
+// Camera is below the cloud looking upward so lightning descends
+// toward the viewer — much more dramatic than the side view.
+// Cloud scale doubled for a more imposing cumulus silhouette.
 // =================================================================
-const float CL_CLOUD_START = 20.0;
-const float CL_CLOUD_HEIGHT = 20.0;
-const float CL_CLOUD_END = 40.0;
-const float CL_CLOUD_EXTENT = 20.0;
+const float CL_CLOUD_START = 18.0;    // bottom of cloud layer
+const float CL_CLOUD_HEIGHT = 28.0;   // taller cloud (was 20)
+const float CL_CLOUD_END = 46.0;      // top of cloud layer
+const float CL_CLOUD_EXTENT = 32.0;   // wider cloud (was 20)
 const int   CL_MAX_STEPS = 32;
 const float CL_MIN_DIST = 0.1;
 const float CL_MAX_DIST = 1000.0;
@@ -468,25 +497,31 @@ float cl_getGlow(float dist, float radius, float intensity){
     return pow(radius/dist, intensity);
 }
 
-// Three independent bolts. Returns SDF; outputs xz of each bolt's exit point.
+// Five independent bolts descend FROM the cloud base downward.
+// b0..b4 are the xz ground-strike positions.
 float cl_getSDF(vec3 p, out vec2 b0, out vec2 b1, out vec2 b2){
     float dist = 1e10;
-    p.y -= CL_CLOUD_START;
-    float strikeFreq = 0.10 + 0.55*u_drumsPunch;     // music boost
-    float speed = 2.5;
-    float boltLength = CL_CLOUD_START * 0.5;
-    float range = CL_CLOUD_EXTENT * 0.4;
-    float scale = 0.5;
+    // Work in a y-frame anchored at cloud base; positive y = into cloud.
+    float py_rel = CL_CLOUD_START - p.y;  // positive below cloud base
+    vec3 pAdj = vec3(p.x, py_rel, p.z);
+
+    // strikeFreq: higher value → more frequent bolts, boosted by drum hits.
+    float strikeFreq = 0.18 + 0.65*u_drumsPunch;
+    float speed = 2.8;
+    // Bolts descend CL_CLOUD_START/2 below cloud base toward the camera.
+    float boltLength = CL_CLOUD_START * 0.6;
+    float range = CL_CLOUD_EXTENT * 0.45;
+    float scale = 0.45;
     float descentDuration = 0.5;
-    float radiusBase = 0.01 + 0.03*u_bassPunch;
+    float radiusBase = 0.012 + 0.04*u_bassPunch;
     int octaves = 4;
     b0 = vec2(1e10); b1 = vec2(1e10); b2 = vec2(1e10);
     float shift = 0.0;
     float shapeOffset = 15.2;
 
-    for (int i = 0; i < 3; i++){
+    for (int i = 0; i < 5; i++){
         shapeOffset *= 2.0;
-        shift = fract(shift + 0.25);
+        shift = fract(shift + 0.2);
         float time = u_time*speed + shift;
         float t = floor(time) + 1.0;
 
@@ -496,18 +531,19 @@ float cl_getSDF(vec3 p, out vec2 b0, out vec2 b1, out vec2 b2){
         location *= range;
         float progress = clamp(fract(time)/descentDuration, 0.0, 1.0);
         float radius = radiusBase;
-        if (progress > 0.95 && fract(time) - descentDuration < 0.1){
-            radius = 0.10 + 0.06*u_bassPunch;
+        if (progress > 0.92 && fract(time) - descentDuration < 0.12){
+            radius = 0.12 + 0.07*u_bassPunch;
         }
         progress *= boltLength;
-        vec3 offset = vec3(location.x + cl_fbm(shapeOffset+t*0.20+(scale*p.y), octaves),
+        // offset.y is positive → bolt descends in pAdj space (below cloud base).
+        vec3 offset = vec3(location.x + cl_fbm(shapeOffset+t*0.20+(scale*pAdj.y), octaves),
                            progress,
-                           location.y + cl_fbm(shapeOffset+t*0.12-(scale*p.y), octaves));
+                           location.y + cl_fbm(shapeOffset+t*0.12-(scale*pAdj.y), octaves));
 
-        if (i == 0) b0 = -location.xy;
-        if (i == 1) b1 = -location.xy;
-        if (i == 2) b2 = -location.xy;
-        dist = min(dist, cl_sdCappedCylinder(p+offset, radius, progress));
+        if (i == 0) b0 = location.xy;
+        if (i == 1) b1 = location.xy;
+        if (i == 2) b2 = location.xy;
+        dist = min(dist, cl_sdCappedCylinder(pAdj - offset, radius, progress));
     }
     return dist;
 }
@@ -611,7 +647,22 @@ vec3 cl_mainRay(vec3 ro, vec3 dir, vec3 sunDir, out float totalT, float mu, floa
     float phase = mix(cl_HG(-0.3, mu), cl_HG(0.3, mu), 0.7);
     float power = 6.0;
     vec3 sunLight = CL_SUNCOL * power;
-    float internalFreq = 0.50 - 0.40*u_drumsPunch;   // lower threshold = more flicker
+    // Beat-matched internal lightning: drumsPunch lowers the threshold so
+    // flashes become far more frequent on every drum hit.
+    float internalFreq = 0.72 - 0.65*u_drumsPunch;   // close to 0 on hard hit
+
+    // Multiple internal flash sources — one central + 4 offset ones for volume.
+    float flashT  = floor(u_time * 8.0);   // 8 possible flash slots per second
+    float flashT2 = floor(u_time * 12.0);
+    vec3 src0 = vec3(0, CL_CLOUD_START + CL_CLOUD_HEIGHT*0.5, 0)
+              + (2.0*cl_hash31(flashT) - 1.0) * CL_CLOUD_EXTENT*0.30;
+    vec3 src1 = vec3(0, CL_CLOUD_START + CL_CLOUD_HEIGHT*0.65, 0)
+              + (2.0*cl_hash31(flashT + 7.3) - 1.0) * CL_CLOUD_EXTENT*0.20;
+    vec3 src2 = vec3(0, CL_CLOUD_START + CL_CLOUD_HEIGHT*0.35, 0)
+              + (2.0*cl_hash31(flashT2 + 3.1) - 1.0) * CL_CLOUD_EXTENT*0.25;
+    bool doFlash0 = cl_hash1(flashT  * 0.137) > internalFreq;
+    bool doFlash1 = cl_hash1(flashT  * 0.237 + 1.0) > internalFreq;
+    bool doFlash2 = cl_hash1(flashT2 * 0.317 + 2.0) > (internalFreq + 0.15);
 
     for (int i = 0; i < CL_STEPS_PRIMARY; i++){
         float ch;
@@ -621,19 +672,21 @@ vec3 cl_mainRay(vec3 ro, vec3 dir, vec3 sunDir, out float totalT, float mu, floa
         float sampleSigmaE = sampleSigmaS;
         if (density > 0.0){
             dCloud = min(dCloud, dist);
-            // internal flicker source
-            vec3 source = vec3(0, CL_CLOUD_START + CL_CLOUD_HEIGHT*0.5, 0)
-                        + (2.0*cl_hash31(floor(u_time*5.0)) - 1.0) * CL_CLOUD_EXTENT*0.25;
-            float prox = length(p - source);
-            float sz = sin(45.0*fract(u_time)) + 5.0;
-            vec3 internal = cl_getGlow(prox, sz, 3.2) * CL_BOLT_COLOUR;
-            if (cl_hash1(floor(u_time)) > internalFreq) internal = vec3(0);
-            // exit-point ambient at cloud bottom
-            float h = 0.9*CL_CLOUD_START;
-            float ssz = 3.0;
-            internal += cl_getGlow(length(p - vec3(b0.x, h, b0.y)), ssz, 2.2) * CL_BOLT_COLOUR;
-            internal += cl_getGlow(length(p - vec3(b1.x, h, b1.y)), ssz, 2.2) * CL_BOLT_COLOUR;
-            internal += cl_getGlow(length(p - vec3(b2.x, h, b2.y)), ssz, 2.2) * CL_BOLT_COLOUR;
+
+            // Internal flickers — multiple sources, beat-gated.
+            float sz0 = sin(38.0*fract(u_time*1.3)) + 5.5;
+            float sz1 = sin(52.0*fract(u_time*0.9)) + 4.5;
+            vec3 internal = vec3(0);
+            if (doFlash0) internal += cl_getGlow(length(p - src0), sz0, 3.5) * CL_BOLT_COLOUR;
+            if (doFlash1) internal += cl_getGlow(length(p - src1), sz1, 3.2) * CL_BOLT_COLOUR * 0.7;
+            if (doFlash2) internal += cl_getGlow(length(p - src2), sz0*0.8, 3.0) * CL_BOLT_COLOUR * 0.5;
+
+            // Entry-point ambient glow where bolt enters the cloud base.
+            float h = CL_CLOUD_START;
+            float ssz = 4.5;
+            internal += cl_getGlow(length(p - vec3(b0.x, h, b0.y)), ssz, 2.4) * CL_BOLT_COLOUR;
+            internal += cl_getGlow(length(p - vec3(b1.x, h, b1.y)), ssz, 2.4) * CL_BOLT_COLOUR;
+            internal += cl_getGlow(length(p - vec3(b2.x, h, b2.y)), ssz, 2.4) * CL_BOLT_COLOUR;
 
             vec3 ambient = internal + CL_SUNCOL * mix(0.05, 0.125, ch);
             vec3 lum = ambient + sunLight*phase*cl_lightRay(p, mu, sunDir);
@@ -653,21 +706,24 @@ vec3 mode_clouds(vec2 uv){
     vec2 fragCoord = uv * u_res;
     vec3 rd0;
     {
-        // wider FOV so the full cloud silhouette fits comfortably in frame
+        // Wide upward-looking FOV so the whole cloud belly fills the frame.
         vec2 xy = fragCoord - u_res*0.5;
-        float z = (0.5*u_res.y) / tan(radians(55.0)*0.5);
+        float z = (0.5*u_res.y) / tan(radians(70.0)*0.5);
         rd0 = normalize(vec3(xy, -z));
     }
 
-    // Steady, slow horizontal arc. Camera sits at the cloud's mid-height and
-    // far enough back that the body fits in frame at 55° FOV. Tiny smooth
-    // bass sway only — no jerky offsets.
-    float ct = u_time*0.07;
-    float camR = 50.0;
-    vec3 ro = vec3(sin(ct)*camR, CL_CLOUD_START + CL_CLOUD_HEIGHT*0.5 + sin(u_time*0.3)*0.6*u_bass, -cos(ct)*camR);
-    vec3 target = vec3(0.0, CL_CLOUD_START + CL_CLOUD_HEIGHT*0.5, 0.0) - ro;
+    // Camera is on the GROUND below the cloud, slowly orbiting and looking up.
+    // A very gentle upward tilt is added so the cloud fills the upper 2/3 of
+    // the frame and bolts descend toward the viewer dramatically.
+    float ct = u_time*0.05;
+    float camR = 22.0;   // close-in orbit — cloud fills the frame
+    // Camera height: below the cloud base, slightly rising with bass.
+    float camY = 2.0 + 1.5*u_bass;
+    vec3 ro = vec3(sin(ct)*camR, camY, -cos(ct)*camR);
 
-    vec3 zaxis = normalize(target);
+    // Look at a point slightly inside the cloud belly (not the center).
+    vec3 lookAt = vec3(0.0, CL_CLOUD_START + 3.0, 0.0);
+    vec3 zaxis = normalize(lookAt - ro);
     vec3 xaxis = normalize(cross(zaxis, vec3(0,1,0)));
     vec3 yaxis = cross(xaxis, zaxis);
     mat3 view = mat3(xaxis, yaxis, -zaxis);
@@ -728,21 +784,28 @@ vec3 mode_starfield(vec2 uv){
 }
 
 // =================================================================
-// MODE 5 — SEASCAPE  (Alexander Alekseev / TDM)
-// Music wiring:
-//   SEA_HEIGHT  <- u_bass
-//   SEA_CHOPPY  <- u_drumsRms
-//   SEA_SPEED   <- u_globalRms
-//   camera ang  <- u_beatPhase
-// Aesthetic darken: final color × 0.55, sky also darkened.
+// MODE 5 — SEASCAPE  (Alexander Alekseev / TDM, 2014)
+// Restored to the original Shadertoy version with minimal music wiring.
+// Original license: CC BY-NC-SA 3.0
 // =================================================================
 const int   SEA_NUM_STEPS = 32;
 const float SEA_EPSILON   = 1e-3;
 const int   SEA_ITER_GEOMETRY = 3;
 const int   SEA_ITER_FRAGMENT = 5;
-const vec3  SEA_BASE = vec3(0.0, 0.07, 0.14);
-const vec3  SEA_WATER_COLOR = vec3(0.6, 0.75, 0.45)*0.5;
+const float SEA_HEIGHT_BASE = 0.6;
+const float SEA_CHOPPY_BASE = 4.0;
+const float SEA_SPEED_BASE  = 0.8;
+const float SEA_FREQ_BASE   = 0.16;
+const vec3  SEA_BASE_COL  = vec3(0.0, 0.09, 0.18);
+const vec3  SEA_WATER_COLOR = vec3(0.8, 0.9, 0.6)*0.6;
 const mat2  SEA_OCT_M = mat2(1.6, 1.2, -1.2, 1.6);
+
+// Runtime globals set per-frame by mode_seascape().
+float SEA_HEIGHT = SEA_HEIGHT_BASE;
+float SEA_CHOPPY = SEA_CHOPPY_BASE;
+float SEA_SPEED  = SEA_SPEED_BASE;
+float SEA_FREQ   = SEA_FREQ_BASE;
+float SEA_T      = 0.0;
 
 mat3 sea_fromEuler(vec3 ang){
     vec2 a1 = vec2(sin(ang.x), cos(ang.x));
@@ -770,43 +833,16 @@ float sea_spec(vec3 n, vec3 l, vec3 e, float s){
     return pow(max(dot(reflect(e, n), l), 0.0), s)*nrm;
 }
 vec3 sea_getSkyColor(vec3 e){
-    // Night sky: deep navy fading to near-black overhead, faint cool horizon
-    // glow at the bottom, stars sprinkled across. The ray-direction projection
-    // (e.x, e.z, e.y) is mapped to a screen-space-ish plane for star sampling
-    // so reflections in the water naturally pick up reflected stars.
-    float h = clamp(e.y, -0.05, 1.0);
-    vec3 zenith  = vec3(0.005, 0.010, 0.022);
-    vec3 horizon = vec3(0.040, 0.060, 0.110);
-    vec3 col = mix(horizon, zenith, smoothstep(0.0, 0.6, h));
-
-    // very faint cool glow right at the horizon
-    col += vec3(0.05, 0.08, 0.14) * exp(-h*30.0) * 0.6;
-
-    // stars — only above horizon
-    if (h > 0.0){
-        // stable 2D parameterisation from view direction; small drift so they
-        // appear to move as the camera drifts
-        vec2 sUV = vec2(atan(e.z, e.x)/TAU + 0.5, h);
-        sUV += vec2(u_time*0.003, 0.0);
-        col += sf_starField(sUV, 0.0) * smoothstep(0.0, 0.15, h) * 0.9;
-        col += sf_nebula(sUV*0.8 + 1.7) * smoothstep(0.0, 0.4, h) * 0.4;
-    }
-    return col;
+    e.y = (max(e.y, 0.0)*0.8 + 0.2)*0.8;
+    return vec3(pow(1.0-e.y, 2.0), 1.0-e.y, 0.6+(1.0-e.y)*0.4) * 1.1;
 }
 float sea_octave(vec2 uv, float choppy){
     uv += sea_noise(uv);
-    vec2 wv = 1.0 - abs(sin(uv));
+    vec2 wv  = 1.0 - abs(sin(uv));
     vec2 swv = abs(cos(uv));
     wv = mix(wv, swv, wv);
     return pow(1.0 - pow(wv.x*wv.y, 0.65), choppy);
 }
-// SEA_TIME, SEA_HEIGHT, SEA_CHOPPY, SEA_SPEED need to be runtime-tied to music.
-// Pass them through globals set by mode_seascape() before calling map().
-float SEA_HEIGHT = 0.6;
-float SEA_CHOPPY = 4.0;
-float SEA_SPEED  = 0.8;
-float SEA_FREQ   = 0.16;
-float SEA_T      = 0.0;
 float sea_map(vec3 p){
     float freq = SEA_FREQ, amp = SEA_HEIGHT, choppy = SEA_CHOPPY;
     vec2 uv = p.xz; uv.x *= 0.75;
@@ -845,7 +881,7 @@ vec3 sea_getColor(vec3 p, vec3 n, vec3 l, vec3 eye, vec3 dist){
     float fres = clamp(1.0 - dot(n, -eye), 0.0, 1.0);
     fres = min(fres*fres*fres, 0.5);
     vec3 reflected = sea_getSkyColor(reflect(eye, n));
-    vec3 refracted = SEA_BASE + sea_diff(n, l, 80.0) * SEA_WATER_COLOR * 0.12;
+    vec3 refracted = SEA_BASE_COL + sea_diff(n, l, 80.0) * SEA_WATER_COLOR * 0.12;
     vec3 color = mix(refracted, reflected, fres);
     float atten = max(1.0 - dot(dist, dist)*0.001, 0.0);
     color += SEA_WATER_COLOR * (p.y - SEA_HEIGHT)*0.18*atten;
@@ -869,29 +905,22 @@ float sea_trace(vec3 ori, vec3 dir, out vec3 p){
 }
 
 vec3 mode_seascape(vec2 uv){
-    // music-driven sea state — wave geometry / chop / flow, not the camera.
-    SEA_HEIGHT = 0.45 + 0.55*u_bass;
-    SEA_CHOPPY = 3.0 + 2.5*u_drumsRms;
-    SEA_SPEED  = 0.45 + 0.6*u_globalRms;
-    SEA_FREQ   = 0.16;
-    float t = u_time * 0.3;
-    SEA_T = 1.0 + t * SEA_SPEED;
+    // Original Seascape sea state, lightly music-wired.
+    SEA_HEIGHT = SEA_HEIGHT_BASE;
+    SEA_CHOPPY = SEA_CHOPPY_BASE;
+    SEA_SPEED  = SEA_SPEED_BASE;
+    SEA_FREQ   = SEA_FREQ_BASE;
+    float time = u_time * 0.3 + u_bass * 0.01;
+    SEA_T = 1.0 + time * SEA_SPEED;
 
     vec2 fragCoord = uv * u_res;
-    vec2 nuv = fragCoord/u_res;
-    nuv = nuv*2.0 - 1.0;
-    nuv.x *= u_res.x/u_res.y;
+    vec2 nuv = fragCoord / u_res;
+    nuv = nuv * 2.0 - 1.0;
+    nuv.x *= u_res.x / u_res.y;
 
-    // Steady, slow camera flow. No beat/punch-driven angles — those caused
-    // the camera to jerk and dip toward the water on heavy bass. Bias the
-    // pitch upward so the horizon stays in frame and the camera can't look
-    // far enough down to fall into the waves.
-    vec3 ang = vec3(sin(t*0.7)*0.05,
-                    0.06 + sin(t*0.4)*0.04,
-                    sin(t*0.6)*0.10);
-    // Higher camera so big bass-driven crests can't reach the lens.
-    float camH = 3.6 + 1.4*u_bass;
-    vec3 ori = vec3(0.0, camH, t*5.0);
+    // Original camera — gentle sine rock, travels forward with time.
+    vec3 ang = vec3(sin(time*3.0)*0.1, sin(time)*0.2 + 0.3, time);
+    vec3 ori = vec3(0.0, 3.5, time*5.0);
     vec3 dir = normalize(vec3(nuv.xy, -2.0));
     dir.z += length(nuv) * 0.14;
     dir = normalize(dir) * sea_fromEuler(ang);
@@ -905,10 +934,8 @@ vec3 mode_seascape(vec2 uv){
     vec3 col = mix(sea_getSkyColor(dir),
                    sea_getColor(p, n, light, dir, dist),
                    pow(smoothstep(0.0, -0.02, dir.y), 0.2));
-    // Night-sky version of getSkyColor is linear; no gamma reshape needed.
-    // Strong overall darken (the user said the original was too bright).
-    col *= 0.45;
-    col *= vec3(0.80, 0.92, 1.15);   // cool-tint into night blue
+    // Original gamma curve from TDM's mainImage.
+    col = pow(col, vec3(0.65));
     return col;
 }
 
@@ -956,15 +983,16 @@ _KERR_DEFINES = r"""
 """
 
 _KN_BLACKHOLE_ADAPTER = r"""
-// --- Synthesized smooth-orbit camera + entry point for Mode 2 ---
-vec3 kn_blackhole(vec2 uv) {
+// Helper: render the black hole for one sub-pixel UV sample.
+vec3 kn_sample(vec2 uv) {
     vec2 iResolution2 = u_res;
 
-    // Steady, slow horizontal orbit. Camera distance is the only music hook
-    // (smooth bass only), so the camera never twitches on hits.
-    float orbT     = u_time * 0.05;
-    float camDist  = 22.0 - 1.5 * u_bass;
-    float camLat   = -3.6 + 1.0 * sin(u_time * 0.07);
+    // Orbit with larger music-driven amplitude so the dance is more visible.
+    float orbT    = u_time * 0.05;
+    // Bass modulates orbit height with wider swing than before.
+    float camLat  = -3.6 + 2.8 * sin(u_time * 0.07) + 1.8 * u_bass;
+    // globalRms slowly varies the orbit radius — wide swings feel physical.
+    float camDist = 20.0 - 3.5 * u_bass - 1.5 * sin(u_time * 0.13);
     vec3 CamPosWorld   = vec3(camDist * sin(orbT), camLat, camDist * cos(orbT));
     vec3 fwd           = normalize(vec3(0.0, 0.5, 0.0) - CamPosWorld);
     vec3 worldUp       = vec3(-0.3, 1.0, 0.0);
@@ -1004,6 +1032,39 @@ vec3 kn_blackhole(vec2 uv) {
     }
     FinalColor = ApplyToneMapping(FinalColor, res.FreqShift);
     return max(FinalColor.rgb, 0.0) * (1.0 + 0.4 * u_globalRms);
+}
+
+// --- Entry point for Mode 2 with 4-sample rotated-grid SSAA ---
+// Four sub-pixel taps on a 2×2 rotated grid cut aliasing of the sharp
+// photon-ring edge and the disk rim, the main sources of shimmer.
+vec3 kn_blackhole(vec2 uv) {
+    vec2 pixelSize = 1.0 / u_res;
+
+    // Rotated-grid 4-rooks pattern offsets (in UV space).
+    vec2 o0 = pixelSize * vec2( 0.125,  0.375);
+    vec2 o1 = pixelSize * vec2(-0.375,  0.125);
+    vec2 o2 = pixelSize * vec2( 0.375, -0.125);
+    vec2 o3 = pixelSize * vec2(-0.125, -0.375);
+
+    vec3 col = (kn_sample(uv + o0) +
+                kn_sample(uv + o1) +
+                kn_sample(uv + o2) +
+                kn_sample(uv + o3)) * 0.25;
+
+    // Slow music-driven colour shift: centroid moves the disk hue between
+    // deep amber/orange and blue-white, bass adds a warm brightness pulse.
+    float hueRot = u_centroid * 0.35 + sin(u_time * 0.12) * 0.12;
+    // Simple hue rotation in RGB via cross-product formula.
+    vec3 k    = vec3(0.577350);                       // (1,1,1)/sqrt(3)
+    float c   = cos(hueRot), s = sin(hueRot);
+    mat3 hueM = mat3(
+        c + k.x*k.x*(1.0-c),      k.x*k.y*(1.0-c) - k.z*s, k.x*k.z*(1.0-c) + k.y*s,
+        k.y*k.x*(1.0-c) + k.z*s,  c + k.y*k.y*(1.0-c),     k.y*k.z*(1.0-c) - k.x*s,
+        k.z*k.x*(1.0-c) - k.y*s,  k.z*k.y*(1.0-c) + k.x*s, c + k.z*k.z*(1.0-c)
+    );
+    col = hueM * col;
+    col *= 1.0 + 0.30 * u_bass;
+    return max(col, 0.0);
 }
 """
 
